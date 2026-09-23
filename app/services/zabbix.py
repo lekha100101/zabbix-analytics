@@ -56,6 +56,11 @@ class ZabbixClient:
             )
         return data.get("result")
 
+    @staticmethod
+    def _chunks(values: list[str], size: int = 200):
+        for i in range(0, len(values), size):
+            yield values[i:i + size]
+
     async def version(self) -> str:
         return await self.call("apiinfo.version", authenticated=False)
 
@@ -70,12 +75,28 @@ class ZabbixClient:
         })
 
     async def triggers(self) -> list[dict[str, Any]]:
-        return await self.call("trigger.get", {
+        # Keep the bulk request lightweight. Large selectHosts/selectTags joins can
+        # make the Zabbix frontend/PHP worker fail with HTTP 500 on large installs.
+        triggers = await self.call("trigger.get", {
             "output": ["triggerid", "description", "priority", "status"],
             "filter": {"status": 0},
-            "selectHosts": ["hostid", "host", "name"],
-            "selectTags": "extend",
         })
+        for trigger in triggers:
+            trigger["hosts"] = []
+            trigger["tags"] = []
+        return triggers
+
+    async def _hosts_for_trigger_ids(self, trigger_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
+        hosts_by_trigger: dict[str, list[dict[str, Any]]] = {}
+        for batch in self._chunks(trigger_ids, 200):
+            triggers = await self.call("trigger.get", {
+                "output": ["triggerid"],
+                "triggerids": batch,
+                "selectHosts": ["hostid", "host", "name"],
+            })
+            for trigger in triggers:
+                hosts_by_trigger[str(trigger["triggerid"])] = trigger.get("hosts", [])
+        return hosts_by_trigger
 
     async def problems(self, limit: int = 1000) -> list[dict[str, Any]]:
         problems = await self.call("problem.get", {
@@ -87,14 +108,7 @@ class ZabbixClient:
             "limit": limit,
         })
         trigger_ids = list({str(p["objectid"]) for p in problems if p.get("objectid")})
-        hosts_by_trigger: dict[str, list[dict[str, Any]]] = {}
-        if trigger_ids:
-            triggers = await self.call("trigger.get", {
-                "output": ["triggerid"],
-                "triggerids": trigger_ids,
-                "selectHosts": ["hostid", "host", "name"],
-            })
-            hosts_by_trigger = {str(t["triggerid"]): t.get("hosts", []) for t in triggers}
+        hosts_by_trigger = await self._hosts_for_trigger_ids(trigger_ids) if trigger_ids else {}
         for problem in problems:
             problem["hosts"] = hosts_by_trigger.get(str(problem.get("objectid", "")), [])
         return problems
