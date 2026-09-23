@@ -25,14 +25,35 @@ class ZabbixClient:
         if authenticated:
             headers["Authorization"] = f"Bearer {self.token}"
 
-        async with httpx.AsyncClient(verify=self.verify_ssl, timeout=self.timeout) as client:
-            response = await client.post(self.api_url, json=payload, headers=headers)
-            response.raise_for_status()
+        try:
+            async with httpx.AsyncClient(verify=self.verify_ssl, timeout=self.timeout) as client:
+                response = await client.post(self.api_url, json=payload, headers=headers)
+        except httpx.RequestError as exc:
+            raise ZabbixAPIError(f"Zabbix request failed: method={method}, url={self.api_url}, error={exc}") from exc
+
+        if response.status_code >= 400:
+            body = response.text.strip().replace("\n", " ")
+            if len(body) > 1000:
+                body = body[:1000] + "..."
+            raise ZabbixAPIError(
+                f"Zabbix HTTP error: method={method}, status={response.status_code}, "
+                f"url={self.api_url}, response={body or '<empty>'}"
+            )
+
+        try:
             data = response.json()
+        except ValueError as exc:
+            body = response.text.strip().replace("\n", " ")[:1000]
+            raise ZabbixAPIError(
+                f"Zabbix returned non-JSON response: method={method}, status={response.status_code}, response={body}"
+            ) from exc
 
         if "error" in data:
             error = data["error"]
-            raise ZabbixAPIError(f"Zabbix API error {error.get('code')}: {error.get('message')} - {error.get('data')}")
+            raise ZabbixAPIError(
+                f"Zabbix API error: method={method}, code={error.get('code')}, "
+                f"message={error.get('message')}, data={error.get('data')}"
+            )
         return data.get("result")
 
     async def version(self) -> str:
