@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, DateTime, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -57,7 +57,21 @@ class Problem(Base):
     hosts: Mapped[list] = mapped_column(JSONB, default=list)
     tags: Mapped[list] = mapped_column(JSONB, default=list)
     impact_score: Mapped[int] = mapped_column(Integer, default=0, index=True)
+    score_breakdown: Mapped[dict] = mapped_column(JSONB, default=dict)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class ScoringRule(Base):
+    __tablename__ = "scoring_rules"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), unique=True)
+    rule_type: Mapped[str] = mapped_column(String(32), index=True)
+    key: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    value: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    points: Mapped[int] = mapped_column(Integer)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    priority: Mapped[int] = mapped_column(Integer, default=100)
 
 
 class SyncRun(Base):
