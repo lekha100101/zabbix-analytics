@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from app.models import Host, HostGroup, Problem, SyncRun, Trigger
+from app.models import Host, HostGroup, Problem, SyncRun
 from app.services.scoring import calculate_impact_score
 from app.services.zabbix import ZabbixClient
 
@@ -55,19 +55,12 @@ async def sync_all(db: Session) -> dict:
             })
         counts["hosts"] = len(hosts)
 
-        triggers = await client.triggers()
-        for item in triggers:
-            upsert(db, Trigger, {"zabbix_triggerid": int(item["triggerid"])}, {
-                "description": item["description"],
-                "priority": int(item.get("priority", 0)),
-                "status": int(item.get("status", 0)),
-                "hosts": item.get("hosts", []),
-                "tags": item.get("tags", []),
-                "updated_at": utcnow(),
-            })
-        counts["triggers"] = len(triggers)
+        # Full trigger inventory is intentionally not synchronized here.
+        # On this Zabbix installation an unrestricted trigger.get returns HTTP 500.
+        # For analytics we only need trigger IDs related to current problems; those
+        # are resolved in small batches by ZabbixClient.problems().
+        counts["triggers"] = "deferred"
 
-        # Mark previous problems inactive first; current problem.get results reactivate them.
         db.execute(update(Problem).where(Problem.active.is_(True)).values(active=False, recovered_at=utcnow()))
 
         problems = await client.problems(limit=1000)
