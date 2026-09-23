@@ -1,0 +1,17 @@
+[Unit]
+Description=Zabbix Analytics API
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=zabbix-analytics
+Group=zabbix-analytics
+WorkingDirectory=/opt/zabbix-analytics
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/zabbix-analytics/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
