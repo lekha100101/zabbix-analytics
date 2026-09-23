@@ -5,12 +5,11 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.database import Base, engine, get_db
 from app.models import Host, HostGroup, Problem, Trigger
-from app.services.scoring import calculate_impact_score
 from app.services.sync import sync_all
 from app.services.zabbix import ZabbixClient
 
 settings = get_settings()
-app = FastAPI(title=settings.app_name, version="0.2.0")
+app = FastAPI(title=settings.app_name, version="0.3.0")
 
 
 @app.on_event("startup")
@@ -25,7 +24,7 @@ def health(db: Session = Depends(get_db)) -> dict:
         database = "ok"
     except Exception as exc:
         database = f"error: {exc}"
-    return {"status": "ok" if database == "ok" else "degraded", "service": settings.app_name, "version": "0.2.0", "database": database}
+    return {"status": "ok" if database == "ok" else "degraded", "service": settings.app_name, "version": "0.3.0", "database": database}
 
 
 @app.get("/api/v1/zabbix/status")
@@ -71,6 +70,7 @@ def problems(limit: int = Query(default=100, ge=1, le=1000), db: Session = Depen
             "hosts": item.hosts,
             "tags": item.tags,
             "impact_score": item.impact_score,
+            "score_breakdown": item.score_breakdown,
         }
         for item in items
     ]
