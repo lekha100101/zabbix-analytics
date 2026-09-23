@@ -97,16 +97,23 @@ class ZabbixClient:
         return hosts_by_trigger
 
     async def problems(self, limit: int = 1000) -> list[dict[str, Any]]:
-        # problem.get may also return recently resolved events when recent=true.
-        # recent=false explicitly restricts the result to unresolved problems only.
+        # r_eventid is 0 while a problem is still open. A non-zero r_eventid means
+        # that Zabbix has linked a recovery event and the problem is resolved.
         problems = await self.call("problem.get", {
-            "output": ["eventid", "objectid", "name", "severity", "clock", "acknowledged"],
+            "output": [
+                "eventid", "objectid", "name", "severity", "clock",
+                "acknowledged", "r_eventid",
+            ],
             "selectTags": "extend",
             "recent": False,
             "sortfield": ["eventid"],
             "sortorder": "DESC",
             "limit": limit,
         })
+
+        # Be explicit even if the Zabbix API/version returns a recovered event.
+        problems = [p for p in problems if str(p.get("r_eventid", "0")) in ("0", "", "None")]
+
         trigger_ids = list({str(p["objectid"]) for p in problems if p.get("objectid")})
         hosts_by_trigger = await self._hosts_for_trigger_ids(trigger_ids) if trigger_ids else {}
         for problem in problems:
