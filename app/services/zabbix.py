@@ -57,7 +57,7 @@ class ZabbixClient:
         return data.get("result")
 
     @staticmethod
-    def _chunks(values: list[str], size: int = 200):
+    def _chunks(values: list[str], size: int = 100):
         for i in range(0, len(values), size):
             yield values[i:i + size]
 
@@ -84,21 +84,26 @@ class ZabbixClient:
             trigger["tags"] = []
         return triggers
 
-    async def _hosts_for_trigger_ids(self, trigger_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
-        hosts_by_trigger: dict[str, list[dict[str, Any]]] = {}
-        for batch in self._chunks(trigger_ids, 200):
+    async def _active_trigger_context(self, trigger_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
+        """Return hosts only for enabled triggers that belong to enabled hosts."""
+        active: dict[str, list[dict[str, Any]]] = {}
+        for batch in self._chunks(trigger_ids, 100):
             triggers = await self.call("trigger.get", {
-                "output": ["triggerid"],
+                "output": ["triggerid", "status"],
                 "triggerids": batch,
-                "selectHosts": ["hostid", "host", "name"],
+                "filter": {"status": 0},
+                "selectHosts": ["hostid", "host", "name", "status"],
             })
             for trigger in triggers:
-                hosts_by_trigger[str(trigger["triggerid"])] = trigger.get("hosts", [])
-        return hosts_by_trigger
+                enabled_hosts = [
+                    host for host in (trigger.get("hosts") or [])
+                    if str(host.get("status", "0")) == "0"
+                ]
+                if enabled_hosts:
+                    active[str(trigger["triggerid"])] = enabled_hosts
+        return active
 
     async def problems(self, limit: int = 1000) -> list[dict[str, Any]]:
-        # r_eventid is 0 while a problem is still open. A non-zero r_eventid means
-        # that Zabbix has linked a recovery event and the problem is resolved.
         problems = await self.call("problem.get", {
             "output": [
                 "eventid", "objectid", "name", "severity", "clock",
@@ -111,11 +116,22 @@ class ZabbixClient:
             "limit": limit,
         })
 
-        # Be explicit even if the Zabbix API/version returns a recovered event.
+        # Keep only unresolved events first.
         problems = [p for p in problems if str(p.get("r_eventid", "0")) in ("0", "", "None")]
 
         trigger_ids = list({str(p["objectid"]) for p in problems if p.get("objectid")})
-        hosts_by_trigger = await self._hosts_for_trigger_ids(trigger_ids) if trigger_ids else {}
+        active_triggers = await self._active_trigger_context(trigger_ids) if trigger_ids else {}
+
+        # An operational problem must belong to an enabled trigger and at least
+        # one enabled host. Disabled trigger/host events remain in our database
+        # history, but are not returned as current active problems.
+        active_problems: list[dict[str, Any]] = []
         for problem in problems:
-            problem["hosts"] = hosts_by_trigger.get(str(problem.get("objectid", "")), [])
-        return problems
+            trigger_id = str(problem.get("objectid", ""))
+            hosts = active_triggers.get(trigger_id)
+            if not hosts:
+                continue
+            problem["hosts"] = hosts
+            active_problems.append(problem)
+
+        return active_problems
