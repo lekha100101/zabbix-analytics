@@ -4,7 +4,7 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.models import Host, HostGroup, Problem, SyncRun
-from app.services.scoring import calculate_impact_score
+from app.services.scoring import calculate_impact
 from app.services.zabbix import ZabbixClient
 
 
@@ -54,17 +54,13 @@ async def sync_all(db: Session) -> dict:
                 "updated_at": utcnow(),
             })
         counts["hosts"] = len(hosts)
-
-        # Full trigger inventory is intentionally not synchronized here.
-        # On this Zabbix installation an unrestricted trigger.get returns HTTP 500.
-        # For analytics we only need trigger IDs related to current problems; those
-        # are resolved in small batches by ZabbixClient.problems().
         counts["triggers"] = "deferred"
 
         db.execute(update(Problem).where(Problem.active.is_(True)).values(active=False, recovered_at=utcnow()))
 
         problems = await client.problems(limit=1000)
         for item in problems:
+            impact_score, breakdown = calculate_impact(item)
             values = {
                 "zabbix_triggerid": int(item["objectid"]) if item.get("objectid") else None,
                 "name": item["name"],
@@ -75,7 +71,8 @@ async def sync_all(db: Session) -> dict:
                 "active": True,
                 "hosts": item.get("hosts", []),
                 "tags": item.get("tags", []),
-                "impact_score": calculate_impact_score(item),
+                "impact_score": impact_score,
+                "score_breakdown": breakdown,
                 "updated_at": utcnow(),
             }
             upsert(db, Problem, {"zabbix_eventid": int(item["eventid"])}, values)
