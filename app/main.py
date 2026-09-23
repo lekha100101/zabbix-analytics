@@ -11,11 +11,12 @@ from app.config import get_settings
 from app.database import Base, engine, get_db
 from app.models import Host, HostGroup, Problem, ScoringRule, Trigger
 from app.services.scoring import ensure_default_rules, recalculate_all
+from app.services.sites import site_analytics
 from app.services.sync import sync_all
 from app.services.zabbix import ZabbixClient
 
 settings = get_settings()
-app = FastAPI(title=settings.app_name, version="0.5.0")
+app = FastAPI(title=settings.app_name, version="0.6.0")
 BASE_DIR = Path(__file__).resolve().parent
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
@@ -37,7 +38,7 @@ def health(db: Session = Depends(get_db)) -> dict:
         db.execute(text("SELECT 1")); database = "ok"
     except Exception as exc:
         database = f"error: {exc}"
-    return {"status": "ok" if database == "ok" else "degraded", "service": settings.app_name, "version": "0.5.0", "database": database}
+    return {"status": "ok" if database == "ok" else "degraded", "service": settings.app_name, "version": "0.6.0", "database": database}
 
 
 @app.get("/api/v1/zabbix/status")
@@ -115,6 +116,12 @@ def group_criticality(groupid: int, payload: dict = Body(...), db: Session = Dep
     group.criticality = max(-50, min(50, int(payload.get("points", 0))))
     db.commit()
     return {"status": "ok", "groupid": str(groupid), "criticality": group.criticality}
+
+
+@app.get("/api/v1/sites")
+def sites(db: Session = Depends(get_db)) -> dict:
+    items = site_analytics(db)
+    return {"count": len(items), "items": items}
 
 
 @app.get("/api/v1/stats")
