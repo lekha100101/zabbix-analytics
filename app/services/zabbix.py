@@ -19,17 +19,22 @@ class ZabbixClient:
         self.timeout = settings.zabbix_timeout
         self._ids = count(1)
 
-    async def call(self, method: str, params: dict[str, Any] | None = None) -> Any:
+    async def call(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+        *,
+        authenticated: bool = True,
+    ) -> Any:
         payload = {
             "jsonrpc": "2.0",
             "method": method,
             "params": params or {},
             "id": next(self._ids),
         }
-        headers = {
-            "Content-Type": "application/json-rpc",
-            "Authorization": f"Bearer {self.token}",
-        }
+        headers = {"Content-Type": "application/json-rpc"}
+        if authenticated:
+            headers["Authorization"] = f"Bearer {self.token}"
 
         async with httpx.AsyncClient(
             verify=self.verify_ssl,
@@ -48,9 +53,8 @@ class ZabbixClient:
         return data.get("result")
 
     async def version(self) -> str:
-        # apiinfo.version does not require authentication, but using the same
-        # transport keeps status checks simple.
-        return await self.call("apiinfo.version")
+        # Zabbix requires apiinfo.version to be called without authorization.
+        return await self.call("apiinfo.version", authenticated=False)
 
     async def problems(self, limit: int = 100) -> list[dict[str, Any]]:
         return await self.call(
