@@ -11,6 +11,7 @@
   <div><strong>Zabbix Analytics</strong><span class="muted"> · Impact prioritization</span></div>
   <nav>
     <button class="nav active" data-tab="problems">Проблемы</button>
+    <button class="nav" data-tab="sites">Объекты</button>
     <button class="nav" data-tab="criticality">Критичность</button>
     <button class="nav" data-tab="scoring">Scoring</button>
   </nav>
@@ -20,6 +21,12 @@
     <div class="toolbar"><h1>Важные проблемы</h1><div><button onclick="syncNow()">Синхронизировать</button><button onclick="loadProblems()">Обновить</button></div></div>
     <div id="cards" class="cards"></div>
     <div class="panel table-wrap"><table><thead><tr><th>Score</th><th>Severity</th><th>Хост</th><th>Проблема</th><th>Возраст</th><th>Подтверждена</th></tr></thead><tbody id="problemsBody"></tbody></table></div>
+  </section>
+
+  <section id="sites" class="tab">
+    <div class="toolbar"><h1>Риски по объектам</h1><button onclick="loadSites()">Обновить</button></div>
+    <p class="muted">Объект определяется по последним двум частям имени хоста: ILO5-ZHET-MB и GW-ZHET-MB → ZHET-MB.</p>
+    <div class="panel table-wrap"><table><thead><tr><th>Risk</th><th>Объект</th><th>Регион</th><th>Проблем</th><th>Затронуто</th><th>Всего хостов</th></tr></thead><tbody id="sitesBody"></tbody></table></div>
   </section>
 
   <section id="criticality" class="tab">
