@@ -53,11 +53,10 @@ class ZabbixClient:
         return data.get("result")
 
     async def version(self) -> str:
-        # Zabbix requires apiinfo.version to be called without authorization.
         return await self.call("apiinfo.version", authenticated=False)
 
     async def problems(self, limit: int = 100) -> list[dict[str, Any]]:
-        return await self.call(
+        problems = await self.call(
             "problem.get",
             {
                 "output": [
@@ -68,7 +67,6 @@ class ZabbixClient:
                     "clock",
                     "acknowledged",
                 ],
-                "selectHosts": ["hostid", "host", "name"],
                 "selectTags": "extend",
                 "recent": False,
                 "sortfield": ["eventid"],
@@ -76,3 +74,33 @@ class ZabbixClient:
                 "limit": limit,
             },
         )
+
+        # problem.get does not support selectHosts. For trigger problems,
+        # objectid is triggerid, so resolve hosts through trigger.get.
+        trigger_ids = list(
+            {
+                str(problem["objectid"])
+                for problem in problems
+                if problem.get("objectid")
+            }
+        )
+
+        hosts_by_trigger: dict[str, list[dict[str, Any]]] = {}
+        if trigger_ids:
+            triggers = await self.call(
+                "trigger.get",
+                {
+                    "output": ["triggerid"],
+                    "triggerids": trigger_ids,
+                    "selectHosts": ["hostid", "host", "name"],
+                },
+            )
+            hosts_by_trigger = {
+                str(trigger["triggerid"]): trigger.get("hosts", [])
+                for trigger in triggers
+            }
+
+        for problem in problems:
+            problem["hosts"] = hosts_by_trigger.get(str(problem.get("objectid", "")), [])
+
+        return problems
