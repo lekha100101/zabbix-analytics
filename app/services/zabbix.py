@@ -75,8 +75,6 @@ class ZabbixClient:
         })
 
     async def triggers(self) -> list[dict[str, Any]]:
-        # Keep the bulk request lightweight. Large selectHosts/selectTags joins can
-        # make the Zabbix frontend/PHP worker fail with HTTP 500 on large installs.
         triggers = await self.call("trigger.get", {
             "output": ["triggerid", "description", "priority", "status"],
             "filter": {"status": 0},
@@ -99,6 +97,8 @@ class ZabbixClient:
         return hosts_by_trigger
 
     async def problems(self, limit: int = 1000) -> list[dict[str, Any]]:
+        # problem.get may also return recently resolved events when recent=true.
+        # recent=false explicitly restricts the result to unresolved problems only.
         problems = await self.call("problem.get", {
             "output": ["eventid", "objectid", "name", "severity", "clock", "acknowledged"],
             "selectTags": "extend",
