@@ -1,4 +1,9 @@
-from fastapi import Body, Depends, FastAPI, HTTPException, Query
+from pathlib import Path
+
+from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
@@ -10,12 +15,20 @@ from app.services.sync import sync_all
 from app.services.zabbix import ZabbixClient
 
 settings = get_settings()
-app = FastAPI(title=settings.app_name, version="0.4.0")
+app = FastAPI(title=settings.app_name, version="0.5.0")
+BASE_DIR = Path(__file__).resolve().parent
+app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
+templates = Jinja2Templates(directory=BASE_DIR / "templates")
 
 
 @app.on_event("startup")
 def startup() -> None:
     Base.metadata.create_all(bind=engine)
+
+
+@app.get("/", response_class=HTMLResponse)
+def dashboard(request: Request):
+    return templates.TemplateResponse(request=request, name="index.html")
 
 
 @app.get("/health")
@@ -24,7 +37,7 @@ def health(db: Session = Depends(get_db)) -> dict:
         db.execute(text("SELECT 1")); database = "ok"
     except Exception as exc:
         database = f"error: {exc}"
-    return {"status": "ok" if database == "ok" else "degraded", "service": settings.app_name, "version": "0.4.0", "database": database}
+    return {"status": "ok" if database == "ok" else "degraded", "service": settings.app_name, "version": "0.5.0", "database": database}
 
 
 @app.get("/api/v1/zabbix/status")
