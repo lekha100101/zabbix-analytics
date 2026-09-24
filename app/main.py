@@ -16,7 +16,7 @@ from app.services.sync import sync_all
 from app.services.zabbix import ZabbixClient
 
 settings = get_settings()
-app = FastAPI(title=settings.app_name, version="0.6.0")
+app = FastAPI(title=settings.app_name, version="0.7.0")
 BASE_DIR = Path(__file__).resolve().parent
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
@@ -38,7 +38,7 @@ def health(db: Session = Depends(get_db)) -> dict:
         db.execute(text("SELECT 1")); database = "ok"
     except Exception as exc:
         database = f"error: {exc}"
-    return {"status": "ok" if database == "ok" else "degraded", "service": settings.app_name, "version": "0.6.0", "database": database}
+    return {"status": "ok" if database == "ok" else "degraded", "service": settings.app_name, "version": "0.7.0", "database": database}
 
 
 @app.get("/api/v1/zabbix/status")
@@ -122,6 +122,19 @@ def group_criticality(groupid: int, payload: dict = Body(...), db: Session = Dep
 def sites(db: Session = Depends(get_db)) -> dict:
     items = site_analytics(db)
     return {"count": len(items), "items": items}
+
+
+@app.get("/api/v1/attention")
+def attention(db: Session = Depends(get_db)) -> dict:
+    items = site_analytics(db)
+    important = [
+        item for item in items
+        if item["risk_score"] >= 70
+        or item["affected_ratio"] >= 50
+        or item["burst_15m"] >= 5
+        or item["probable_cause"]
+    ]
+    return {"count": len(important), "items": important[:20]}
 
 
 @app.get("/api/v1/stats")
