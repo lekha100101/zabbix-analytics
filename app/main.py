@@ -17,7 +17,7 @@ from app.services.sync import sync_all
 from app.services.zabbix import ZabbixClient
 
 settings = get_settings()
-app = FastAPI(title=settings.app_name, version="0.8.2")
+app = FastAPI(title=settings.app_name, version="0.8.3")
 BASE_DIR = Path(__file__).resolve().parent
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
@@ -39,7 +39,7 @@ def health(db: Session = Depends(get_db)) -> dict:
         db.execute(text("SELECT 1")); database = "ok"
     except Exception as exc:
         database = f"error: {exc}"
-    return {"status": "ok" if database == "ok" else "degraded", "service": settings.app_name, "version": "0.8.2", "database": database}
+    return {"status": "ok" if database == "ok" else "degraded", "service": settings.app_name, "version": "0.8.3", "database": database}
 
 
 @app.get("/api/v1/zabbix/status")
