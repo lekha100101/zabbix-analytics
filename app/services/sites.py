@@ -46,22 +46,47 @@ def parse_host_name(name: str) -> dict | None:
     }
 
 
-AVAILABILITY_TAGS = {"availability"}
+# Zabbix templates may add scope=availability to problems that do not mean
+# the host itself is unavailable (for example filesystem capacity alerts).
+# Site outage correlation therefore requires an explicit host/connectivity
+# failure signal instead of trusting scope=availability alone.
 AVAILABILITY_PATTERNS = (
-    "unavailable", "is unreachable", "not reachable", "no ping",
-    "icmp ping", "agent is not available", "agent is unavailable",
-    "snmp agent is not available", "snmp unavailable",
-    "interface is down", "link down", "host is down",
+    "unavailable by icmp",
+    "icmp ping is unavailable",
+    "icmp ping unavailable",
+    "host is unreachable",
+    "host unreachable",
+    "is unreachable",
+    "not reachable",
+    "no ping",
+    "agent is not available",
+    "agent is unavailable",
+    "snmp agent is not available",
+    "snmp unavailable",
+    "interface is down",
+    "link is down",
+    "link down",
+    "host is down",
+)
+
+NON_OUTAGE_PATTERNS = (
+    "space is low",
+    "space is critically low",
+    "disk space",
+    "filesystem space",
+    "backup failed",
+    "no backup",
 )
 
 
 def is_availability_problem(problem: Problem) -> bool:
-    for tag in problem.tags or []:
-        tag_name = str(tag.get("tag", "")).strip().lower()
-        tag_value = str(tag.get("value", "")).strip().lower()
-        if tag_name == "scope" and tag_value in AVAILABILITY_TAGS:
-            return True
-    name = (problem.name or "").lower()
+    name = (problem.name or "").strip().lower()
+
+    # Explicit capacity/backup symptoms are not host outages even when the
+    # standard Zabbix template also attaches scope=availability.
+    if any(pattern in name for pattern in NON_OUTAGE_PATTERNS):
+        return False
+
     return any(pattern in name for pattern in AVAILABILITY_PATTERNS)
 
 
