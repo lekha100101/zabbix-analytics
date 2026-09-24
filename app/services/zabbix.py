@@ -103,6 +103,37 @@ class ZabbixClient:
                     active[str(trigger["triggerid"])] = enabled_hosts
         return active
 
+    async def trigger_context(self, trigger_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
+        """Return hosts for triggers, including disabled ones, for historical analytics."""
+        context: dict[str, list[dict[str, Any]]] = {}
+        for batch in self._chunks(trigger_ids, 100):
+            triggers = await self.call("trigger.get", {
+                "output": ["triggerid", "status"],
+                "triggerids": batch,
+                "selectHosts": ["hostid", "host", "name", "status"],
+            })
+            for trigger in triggers:
+                context[str(trigger["triggerid"])] = trigger.get("hosts") or []
+        return context
+
+    async def problem_history(self, time_from: int, limit: int = 10000) -> list[dict[str, Any]]:
+        events = await self.call("event.get", {
+            "output": ["eventid", "objectid", "name", "severity", "clock", "r_eventid"],
+            "source": 0,
+            "object": 0,
+            "value": 1,
+            "time_from": time_from,
+            "selectTags": "extend",
+            "sortfield": ["eventid"],
+            "sortorder": "DESC",
+            "limit": limit,
+        })
+        trigger_ids = list({str(e["objectid"]) for e in events if e.get("objectid")})
+        context = await self.trigger_context(trigger_ids) if trigger_ids else {}
+        for event in events:
+            event["hosts"] = context.get(str(event.get("objectid", "")), [])
+        return events
+
     async def problems(self, limit: int = 1000) -> list[dict[str, Any]]:
         problems = await self.call("problem.get", {
             "output": [
