@@ -13,6 +13,7 @@
     <button class="nav active" data-tab="problems">Проблемы</button>
     <button class="nav" data-tab="attention">Требует внимания</button>
     <button class="nav" data-tab="sites">Объекты</button>
+    <button class="nav" data-tab="instability">Нестабильность</button>
     <button class="nav" data-tab="criticality">Критичность</button>
     <button class="nav" data-tab="scoring">Scoring</button>
   </nav>
@@ -35,6 +36,13 @@
     <div class="toolbar"><h1>Риски по объектам</h1><button onclick="loadSites()">Обновить</button></div>
     <p class="muted">Объект определяется по последним двум частям имени хоста: ILO5-ZHET-MB и GW-ZHET-MB → ZHET-MB.</p>
     <div class="panel table-wrap"><table><thead><tr><th>Risk</th><th>Объект</th><th>Регион</th><th>Проблем</th><th>Затронуто</th><th>Всего хостов</th><th>Недоступно %</th><th>15 мин</th></tr></thead><tbody id="sitesBody"></tbody></table></div>
+  </section>
+
+  <section id="instability" class="tab">
+    <div class="toolbar"><h1>Повторяющиеся проблемы</h1><button onclick="loadInstability()">Обновить</button></div>
+    <p class="muted">История за 7 дней. Повторные открытия одной проблемы на одном хосте используются как сигнал нестабильности/flapping.</p>
+    <div id="instabilityCards" class="cards"></div>
+    <div class="panel table-wrap"><table><thead><tr><th>Score</th><th>Хост</th><th>Проблема</th><th>24 часа</th><th>7 дней</th><th>Восстановлено</th><th>Последнее событие</th></tr></thead><tbody id="instabilityBody"></tbody></table></div>
   </section>
 
   <section id="criticality" class="tab">
