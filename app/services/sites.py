@@ -46,6 +46,25 @@ def parse_host_name(name: str) -> dict | None:
     }
 
 
+AVAILABILITY_TAGS = {"availability"}
+AVAILABILITY_PATTERNS = (
+    "unavailable", "is unreachable", "not reachable", "no ping",
+    "icmp ping", "agent is not available", "agent is unavailable",
+    "snmp agent is not available", "snmp unavailable",
+    "interface is down", "link down", "host is down",
+)
+
+
+def is_availability_problem(problem: Problem) -> bool:
+    for tag in problem.tags or []:
+        tag_name = str(tag.get("tag", "")).strip().lower()
+        tag_value = str(tag.get("value", "")).strip().lower()
+        if tag_name == "scope" and tag_value in AVAILABILITY_TAGS:
+            return True
+    name = (problem.name or "").lower()
+    return any(pattern in name for pattern in AVAILABILITY_PATTERNS)
+
+
 def _problem_hostids(problem: Problem) -> set[int]:
     result: set[int] = set()
     for host in problem.hosts or []:
@@ -73,6 +92,7 @@ def site_analytics(db: Session) -> list[dict]:
             "site": parsed["site"],
             "hosts_total": 0,
             "affected_hostids": set(),
+            "unavailable_hostids": set(),
             "equipment": defaultdict(int),
             "roles": defaultdict(int),
             "problems": [],
@@ -82,6 +102,7 @@ def site_analytics(db: Session) -> list[dict]:
         site["roles"][equipment_role(parsed["equipment"])] += 1
 
     for problem in problems:
+        availability_problem = is_availability_problem(problem)
         site_keys: set[str] = set()
         matched_hosts: list[dict] = []
         for hostid in _problem_hostids(problem):
@@ -91,6 +112,8 @@ def site_analytics(db: Session) -> list[dict]:
             host, parsed = item
             site_keys.add(parsed["site_key"])
             sites[parsed["site_key"]]["affected_hostids"].add(hostid)
+            if availability_problem:
+                sites[parsed["site_key"]]["unavailable_hostids"].add(hostid)
             matched_hosts.append({
                 "hostid": str(hostid),
                 "name": host.visible_name,
@@ -104,6 +127,7 @@ def site_analytics(db: Session) -> list[dict]:
                 "name": problem.name,
                 "severity": problem.severity,
                 "impact_score": problem.impact_score,
+                "availability": availability_problem,
                 "started_at": problem.started_at,
                 "hosts": [h for h in matched_hosts if h["site_key"] == key],
             })
@@ -116,6 +140,8 @@ def site_analytics(db: Session) -> list[dict]:
         max_score = max(p["impact_score"] for p in problems_for_site)
         affected = len(site["affected_hostids"])
         affected_ratio = round((affected / site["hosts_total"]) * 100, 1) if site["hosts_total"] else 0.0
+        unavailable = len(site["unavailable_hostids"])
+        unavailable_ratio = round((unavailable / site["hosts_total"]) * 100, 1) if site["hosts_total"] else 0.0
 
         now = datetime.now(timezone.utc)
         burst_5m = sum(1 for p in problems_for_site if (now - p["started_at"]).total_seconds() <= 300)
@@ -126,24 +152,29 @@ def site_analytics(db: Session) -> list[dict]:
             for p in problems_for_site
             for h in p["hosts"]
         }
-        gateway_affected = "gateway" in affected_roles
+        unavailable_roles = {
+            h["role"]
+            for p in problems_for_site if p["availability"]
+            for h in p["hosts"]
+        }
+        gateway_affected = "gateway" in unavailable_roles
         critical_service_affected = bool({"pacs", "database", "storage"} & affected_roles)
 
         multi_device_bonus = min(15, max(0, affected - 1) * 3)
         problem_volume_bonus = min(10, max(0, len(problems_for_site) - 1))
-        outage_ratio_bonus = 15 if affected_ratio >= 75 else 10 if affected_ratio >= 50 else 5 if affected_ratio >= 25 else 0
+        outage_ratio_bonus = 15 if unavailable_ratio >= 75 else 10 if unavailable_ratio >= 50 else 5 if unavailable_ratio >= 25 else 0
         burst_bonus = 10 if burst_5m >= 5 else 6 if burst_15m >= 5 else 3 if burst_15m >= 3 else 0
-        gateway_bonus = 10 if gateway_affected and affected >= 2 else 0
+        gateway_bonus = 10 if gateway_affected and unavailable >= 2 else 0
         critical_service_bonus = 5 if critical_service_affected else 0
 
         probable_cause = None
-        if gateway_affected and affected_ratio >= 50:
+        if gateway_affected and unavailable_ratio >= 50:
             probable_cause = "Вероятная проблема связи/GW объекта"
-        elif gateway_affected and affected >= 2:
+        elif gateway_affected and unavailable >= 2:
             probable_cause = "Возможная проблема шлюза или WAN"
         elif burst_5m >= 5:
             probable_cause = "Массовый всплеск проблем на объекте"
-        elif affected_ratio >= 75:
+        elif unavailable_ratio >= 75:
             probable_cause = "Большая часть оборудования объекта недоступна"
         elif critical_service_affected:
             probable_cause = "Затронут критичный сервис объекта"
@@ -163,6 +194,8 @@ def site_analytics(db: Session) -> list[dict]:
             "affected_hosts": affected,
             "hosts_total": site["hosts_total"],
             "affected_ratio": affected_ratio,
+            "unavailable_hosts": unavailable,
+            "unavailable_ratio": unavailable_ratio,
             "burst_5m": burst_5m,
             "burst_15m": burst_15m,
             "gateway_affected": gateway_affected,
@@ -172,7 +205,7 @@ def site_analytics(db: Session) -> list[dict]:
                 "max_problem": max_score,
                 "multi_device": multi_device_bonus,
                 "problem_volume": problem_volume_bonus,
-                "affected_ratio": outage_ratio_bonus,
+                "unavailable_ratio": outage_ratio_bonus,
                 "burst": burst_bonus,
                 "gateway": gateway_bonus,
                 "critical_service": critical_service_bonus,
