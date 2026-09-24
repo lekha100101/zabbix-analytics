@@ -63,6 +63,21 @@ class Problem(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class ProblemEvent(Base):
+    __tablename__ = "problem_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    zabbix_eventid: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
+    zabbix_triggerid: Mapped[int | None] = mapped_column(BigInteger, index=True, nullable=True)
+    name: Mapped[str] = mapped_column(Text)
+    severity: Mapped[int] = mapped_column(Integer, default=0, index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    recovered: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    hosts: Mapped[list] = mapped_column(JSONB, default=list)
+    tags: Mapped[list] = mapped_column(JSONB, default=list)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class ScoringRule(Base):
     __tablename__ = "scoring_rules"
 
