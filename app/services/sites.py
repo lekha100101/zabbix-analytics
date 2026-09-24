@@ -79,15 +79,38 @@ NON_OUTAGE_PATTERNS = (
 )
 
 
-def is_availability_problem(problem: Problem) -> bool:
+CATEGORY_PATTERNS = {
+    "backup": ("backup failed", "no backup", "backup job", "backup error"),
+    "capacity": ("space is low", "space is critically low", "disk space", "filesystem space", "free space"),
+    "hardware": ("raid", "physical disk", "power supply", "fan", "temperature", "system status is in critical state", "hardware health"),
+    "performance": ("cpu load", "high cpu", "memory utilization", "latency", "i/o latency", "response time"),
+    "network": ("vpn tunnel", "tunnel is down", "wan", "packet loss", "interface error"),
+    "service": ("service is down", "service unavailable", "tcp service", "tcp port"),
+}
+
+
+def classify_problem(problem: Problem) -> str:
     name = (problem.name or "").strip().lower()
+    if any(pattern in name for pattern in AVAILABILITY_PATTERNS):
+        return "availability"
+    for category, patterns in CATEGORY_PATTERNS.items():
+        if any(pattern in name for pattern in patterns):
+            return category
 
-    # Explicit capacity/backup symptoms are not host outages even when the
-    # standard Zabbix template also attaches scope=availability.
-    if any(pattern in name for pattern in NON_OUTAGE_PATTERNS):
-        return False
+    scopes = {
+        str(tag.get("value", "")).strip().lower()
+        for tag in problem.tags or []
+        if str(tag.get("tag", "")).strip().lower() == "scope"
+    }
+    if "capacity" in scopes:
+        return "capacity"
+    if "performance" in scopes:
+        return "performance"
+    return "other"
 
-    return any(pattern in name for pattern in AVAILABILITY_PATTERNS)
+
+def is_availability_problem(problem: Problem) -> bool:
+    return classify_problem(problem) == "availability"
 
 
 def _problem_hostids(problem: Problem) -> set[int]:
@@ -127,7 +150,8 @@ def site_analytics(db: Session) -> list[dict]:
         site["roles"][equipment_role(parsed["equipment"])] += 1
 
     for problem in problems:
-        availability_problem = is_availability_problem(problem)
+        category = classify_problem(problem)
+        availability_problem = category == "availability"
         site_keys: set[str] = set()
         matched_hosts: list[dict] = []
         for hostid in _problem_hostids(problem):
@@ -153,6 +177,7 @@ def site_analytics(db: Session) -> list[dict]:
                 "severity": problem.severity,
                 "impact_score": problem.impact_score,
                 "availability": availability_problem,
+                "category": category,
                 "started_at": problem.started_at,
                 "hosts": [h for h in matched_hosts if h["site_key"] == key],
             })
@@ -192,6 +217,10 @@ def site_analytics(db: Session) -> list[dict]:
         gateway_bonus = 10 if gateway_affected and unavailable >= 2 else 0
         critical_service_bonus = 5 if critical_service_affected else 0
 
+        category_counts: dict[str, int] = defaultdict(int)
+        for p in problems_for_site:
+            category_counts[p["category"]] += 1
+
         probable_cause = None
         if gateway_affected and unavailable_ratio >= 50:
             probable_cause = "Вероятная проблема связи/GW объекта"
@@ -203,6 +232,18 @@ def site_analytics(db: Session) -> list[dict]:
             probable_cause = "Большая часть оборудования объекта недоступна"
         elif critical_service_affected:
             probable_cause = "Затронут критичный сервис объекта"
+        elif category_counts["capacity"]:
+            probable_cause = "Проблема емкости дискового пространства/хранилища"
+        elif category_counts["backup"]:
+            probable_cause = "Проблема резервного копирования"
+        elif category_counts["hardware"]:
+            probable_cause = "Аппаратная проблема оборудования"
+        elif category_counts["network"]:
+            probable_cause = "Сетевая проблема"
+        elif category_counts["performance"]:
+            probable_cause = "Проблема производительности"
+        elif category_counts["service"]:
+            probable_cause = "Проблема доступности сервиса"
 
         risk_score = min(
             100,
@@ -226,6 +267,7 @@ def site_analytics(db: Session) -> list[dict]:
             "gateway_affected": gateway_affected,
             "critical_service_affected": critical_service_affected,
             "probable_cause": probable_cause,
+            "categories": dict(sorted(category_counts.items())),
             "risk_breakdown": {
                 "max_problem": max_score,
                 "multi_device": multi_device_bonus,
