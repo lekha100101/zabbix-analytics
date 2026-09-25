@@ -2,7 +2,6 @@ from datetime import timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from app.models import Host, ProblemEvent
-from app.services.sites import parse_host_name
 
 POWER_PATTERNS = (
     "on battery", "battery mode", "running on battery", "ups is on battery",
@@ -10,6 +9,15 @@ POWER_PATTERNS = (
     "input power lost", "input power failure", "mains failure", "mains lost",
     "line power failure", "ac input failure",
 )
+
+
+def _parse_site(name):
+    value = (name or "").strip()
+    parts = value.split("-")
+    if len(parts) < 3:
+        return None
+    return {"equipment": "-".join(parts[:-2]).upper(), "site_key": f"{parts[-2].upper()}-{parts[-1].upper()}"}
+
 BATTERY_LOW_PATTERNS = (
     "battery low", "low battery", "battery charge is low",
     "battery capacity is low", "remaining battery",
@@ -29,7 +37,7 @@ def power_correlation(db: Session, site_key: str, outage_started_at, window_minu
     site_hostids = set()
     ups_hostids = set()
     for host in hosts:
-        parsed = parse_host_name(host.technical_name or host.visible_name)
+        parsed = _parse_site(host.technical_name or host.visible_name)
         if not parsed or parsed["site_key"] != site_key:
             continue
         hid = int(host.zabbix_hostid)
