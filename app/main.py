@@ -1,4 +1,5 @@
 from pathlib import Path
+from datetime import datetime, timezone
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
@@ -17,7 +18,7 @@ from app.services.sync import sync_all
 from app.services.zabbix import ZabbixClient
 
 settings = get_settings()
-app = FastAPI(title=settings.app_name, version="0.8.3")
+app = FastAPI(title=settings.app_name, version="0.9.0")
 BASE_DIR = Path(__file__).resolve().parent
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
@@ -39,7 +40,7 @@ def health(db: Session = Depends(get_db)) -> dict:
         db.execute(text("SELECT 1")); database = "ok"
     except Exception as exc:
         database = f"error: {exc}"
-    return {"status": "ok" if database == "ok" else "degraded", "service": settings.app_name, "version": "0.8.3", "database": database}
+    return {"status": "ok" if database == "ok" else "degraded", "service": settings.app_name, "version": "0.9.0", "database": database}
 
 
 @app.get("/api/v1/zabbix/status")
@@ -149,8 +150,58 @@ def stats(db: Session = Depends(get_db)) -> dict:
     return {"host_groups": db.scalar(select(func.count()).select_from(HostGroup)), "hosts": db.scalar(select(func.count()).select_from(Host)), "triggers": db.scalar(select(func.count()).select_from(Trigger)), "active_problems": db.scalar(select(func.count()).select_from(Problem).where(Problem.active.is_(True)))}
 
 
+@app.patch("/api/v1/problems/{eventid}/defer")
+def defer_problem(eventid: int, payload: dict = Body(...), db: Session = Depends(get_db)) -> dict:
+    problem = db.scalar(select(Problem).where(Problem.zabbix_eventid == eventid))
+    if not problem or not problem.active:
+        raise HTTPException(status_code=404, detail="Active problem not found")
+    raw_until = payload.get("until")
+    if not raw_until:
+        raise HTTPException(status_code=400, detail="until is required")
+    try:
+        until = datetime.fromisoformat(str(raw_until).replace("Z", "+00:00"))
+        if until.tzinfo is None:
+            until = until.replace(tzinfo=timezone.utc)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid until datetime") from exc
+    if until <= datetime.now(timezone.utc):
+        raise HTTPException(status_code=400, detail="until must be in the future")
+    problem.deferred_until = until
+    problem.deferred_reason = str(payload.get("reason") or "").strip() or None
+    problem.deferred_at = datetime.now(timezone.utc)
+    db.commit()
+    return {"status": "ok", "eventid": str(eventid), "deferred_until": problem.deferred_until}
+
+
+@app.delete("/api/v1/problems/{eventid}/defer")
+def undefer_problem(eventid: int, db: Session = Depends(get_db)) -> dict:
+    problem = db.scalar(select(Problem).where(Problem.zabbix_eventid == eventid))
+    if not problem:
+        raise HTTPException(status_code=404, detail="Problem not found")
+    problem.deferred_until = None
+    problem.deferred_reason = None
+    problem.deferred_at = None
+    db.commit()
+    return {"status": "ok", "eventid": str(eventid)}
+
+
+@app.get("/api/v1/deferred-problems")
+def deferred_problems(db: Session = Depends(get_db)) -> dict:
+    now = datetime.now(timezone.utc)
+    items = db.scalars(
+        select(Problem)
+        .where(Problem.active.is_(True), Problem.deferred_until > now)
+        .order_by(Problem.deferred_until.asc(), Problem.impact_score.desc())
+    ).all()
+    result = [{"eventid": str(i.zabbix_eventid), "name": i.name, "severity": i.severity,
+               "started_at": i.started_at, "hosts": i.hosts, "impact_score": i.impact_score,
+               "deferred_until": i.deferred_until, "deferred_reason": i.deferred_reason,
+               "deferred_at": i.deferred_at} for i in items]
+    return {"count": len(result), "items": result}
+
+
 @app.get("/api/v1/problems")
 def problems(limit: int = Query(100, ge=1, le=1000), db: Session = Depends(get_db)) -> dict:
-    items = db.scalars(select(Problem).where(Problem.active.is_(True)).order_by(Problem.impact_score.desc(), Problem.started_at.asc()).limit(limit)).all()
+    items = db.scalars(select(Problem).where(Problem.active.is_(True), ((Problem.deferred_until.is_(None)) | (Problem.deferred_until <= datetime.now(timezone.utc)))).order_by(Problem.impact_score.desc(), Problem.started_at.asc()).limit(limit)).all()
     result = [{"eventid": str(i.zabbix_eventid), "objectid": str(i.zabbix_triggerid) if i.zabbix_triggerid else None, "name": i.name, "severity": i.severity, "acknowledged": i.acknowledged, "started_at": i.started_at, "hosts": i.hosts, "tags": i.tags, "impact_score": i.impact_score, "score_breakdown": i.score_breakdown} for i in items]
     return {"count": len(result), "items": result}
