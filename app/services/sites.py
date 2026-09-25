@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import Host, Problem
+from app.services.correlation import power_correlation
 
 
 # Expected convention: <equipment>-<region>-<site>, e.g. ILO5-ZHET-MB.
@@ -222,7 +223,13 @@ def site_analytics(db: Session) -> list[dict]:
             category_counts[p["category"]] += 1
 
         probable_cause = None
-        if gateway_affected and unavailable_ratio >= 50:
+        root_cause = None
+        outage_times = [p["started_at"] for p in problems_for_site if p["availability"]]
+        if outage_times:
+            root_cause = power_correlation(db, site["site_key"], min(outage_times))
+        if root_cause:
+            probable_cause = root_cause["probable_cause"]
+        elif gateway_affected and unavailable_ratio >= 50:
             probable_cause = "Вероятная проблема связи/GW объекта"
         elif gateway_affected and unavailable >= 2:
             probable_cause = "Возможная проблема шлюза или WAN"
@@ -267,6 +274,7 @@ def site_analytics(db: Session) -> list[dict]:
             "gateway_affected": gateway_affected,
             "critical_service_affected": critical_service_affected,
             "probable_cause": probable_cause,
+            "root_cause": root_cause,
             "categories": dict(sorted(category_counts.items())),
             "risk_breakdown": {
                 "max_problem": max_score,
