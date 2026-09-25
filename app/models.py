@@ -61,6 +61,9 @@ class Problem(Base):
     impact_score: Mapped[int] = mapped_column(Integer, default=0, index=True)
     score_breakdown: Mapped[dict] = mapped_column(JSONB, default=dict)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    deferred_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    deferred_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    deferred_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class ProblemEvent(Base):
