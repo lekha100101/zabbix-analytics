@@ -232,17 +232,17 @@ def site_analytics(db: Session) -> list[dict]:
             probable_cause = "Большая часть оборудования объекта недоступна"
         elif critical_service_affected:
             probable_cause = "Затронут критичный сервис объекта"
-        elif category_counts["capacity"]:
+        elif category_counts.get("capacity", 0):
             probable_cause = "Проблема емкости дискового пространства/хранилища"
-        elif category_counts["backup"]:
+        elif category_counts.get("backup", 0):
             probable_cause = "Проблема резервного копирования"
-        elif category_counts["hardware"]:
+        elif category_counts.get("hardware", 0):
             probable_cause = "Аппаратная проблема оборудования"
-        elif category_counts["network"]:
+        elif category_counts.get("network", 0):
             probable_cause = "Сетевая проблема"
-        elif category_counts["performance"]:
+        elif category_counts.get("performance", 0):
             probable_cause = "Проблема производительности"
-        elif category_counts["service"]:
+        elif category_counts.get("service", 0):
             probable_cause = "Проблема доступности сервиса"
 
         risk_score = min(
