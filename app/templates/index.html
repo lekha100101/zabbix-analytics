@@ -12,6 +12,7 @@
   <nav>
     <button class="nav active" data-tab="problems">Проблемы</button>
     <button class="nav" data-tab="attention">Требует внимания</button>
+    <button class="nav" data-tab="deferred">Отложенные</button>
     <button class="nav" data-tab="sites">Объекты</button>
     <button class="nav" data-tab="instability">Нестабильность</button>
     <button class="nav" data-tab="criticality">Критичность</button>
@@ -23,6 +24,13 @@
     <div class="toolbar"><h1>Важные проблемы</h1><div><button onclick="syncNow()">Синхронизировать</button><button onclick="loadProblems()">Обновить</button></div></div>
     <div id="cards" class="cards"></div>
     <div class="panel table-wrap"><table><thead><tr><th>Score</th><th>Severity</th><th>Хост</th><th>Проблема</th><th>Возраст</th><th>Подтверждена</th></tr></thead><tbody id="problemsBody"></tbody></table></div>
+  </section>
+
+  <section id="deferred" class="tab">
+    <div class="toolbar"><h1>Отложенные проблемы</h1><button onclick="loadDeferred()">Обновить</button></div>
+    <p class="muted">Проблемы, которые временно исключены из основного списка до указанного срока.</p>
+    <div id="deferredCards" class="cards"></div>
+    <div class="panel table-wrap"><table><thead><tr><th>Score</th><th>Severity</th><th>Хост</th><th>Проблема</th><th>Отложено до</th><th>Причина</th><th></th></tr></thead><tbody id="deferredBody"></tbody></table></div>
   </section>
 
   <section id="attention" class="tab">
