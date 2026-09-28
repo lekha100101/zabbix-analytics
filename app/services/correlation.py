@@ -7,7 +7,7 @@ POWER_PATTERNS = (
     "on battery", "battery mode", "running on battery", "ups is on battery",
     "utility power failure", "utility power is down", "utility power lost",
     "input power lost", "input power failure", "mains failure", "mains lost",
-    "line power failure", "ac input failure",
+    "line power failure", "ac input failure", "input source failure",
 )
 
 
@@ -27,7 +27,7 @@ def _matches(name, patterns):
     value = (name or "").lower()
     return any(p in value for p in patterns)
 
-def power_correlation(db: Session, site_key: str, outage_started_at, window_minutes: int = 60):
+def power_correlation(db: Session, site_key: str, outage_started_at, window_minutes: int = 120):
     if not outage_started_at:
         return None
     if outage_started_at.tzinfo is None:
