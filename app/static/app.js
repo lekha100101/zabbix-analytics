@@ -36,8 +36,7 @@ function renderCorrelationChain() {
   }
   el.innerHTML = corrSteps.map((x, i) =>
     '<div class="corr-step"><div class="corr-num">' + (i + 1) + '</div>' +
-    '<div class="corr-step-text"><b>' + esc(x.name) + '</b><small>' +
-    esc((x.hosts || []).join(', ') || 'Любой хост объекта') + '</small></div>' +
+    '<div class="corr-step-text"><b>' + esc(x.pattern || x.name) + '</b><small>Любой хост · все объекты</small></div>' +
     '<div class="corr-step-actions"><button type="button" onclick="moveCorr(' + i + ',-1)">←</button>' +
     '<button type="button" onclick="moveCorr(' + i + ',1)">→</button>' +
     '<button type="button" onclick="removeCorr(' + i + ')">×</button></div></div>'
@@ -67,10 +66,27 @@ async function loadCorrelationEvents() {
   }
 }
 
+function suggestCorrelationPattern(name) {
+  let value = String(name || '').trim();
+  const known = [
+    'Unavailable by ICMP', 'unavailable by ICMP', 'is unreachable by ICMP',
+    'input source Failure', 'Input voltage too high', 'Input voltage too low',
+    'on Battery', 'battery low', 'Backup failed', 'No backup'
+  ];
+  const lower = value.toLowerCase();
+  for (const p of known) {
+    const pos = lower.indexOf(p.toLowerCase());
+    if (pos >= 0) return value.slice(pos);
+  }
+  return value;
+}
 function addCorr(i) {
   const x = (window._corrEvents || [])[i];
   if (!x) return;
-  corrSteps.push({triggerid: x.triggerid, name: x.name, hosts: x.hosts || []});
+  const suggested = suggestCorrelationPattern(x.name);
+  const pattern = prompt('Шаблон события. Он будет применяться ко всем хостам и объектам:', suggested);
+  if (pattern === null || !pattern.trim()) return;
+  corrSteps.push({pattern: pattern.trim(), name: pattern.trim(), match: 'contains'});
   renderCorrelationChain();
 }
 function removeCorr(i) { corrSteps.splice(i, 1); renderCorrelationChain(); }
