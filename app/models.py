@@ -103,3 +103,16 @@ class SyncRun(Base):
     status: Mapped[str] = mapped_column(String(32), index=True)
     details: Mapped[dict] = mapped_column(JSONB, default=dict)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class CorrelationRule(Base):
+    __tablename__ = "correlation_rules"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), index=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    window_minutes: Mapped[int] = mapped_column(Integer, default=120)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    steps: Mapped[list] = mapped_column(JSONB, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
