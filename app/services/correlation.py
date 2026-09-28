@@ -29,20 +29,21 @@ def user_correlation(db: Session, site_key: str, reference_at: datetime | None =
     if not rules: return None
     reference_at=reference_at or datetime.now(timezone.utc)
     if reference_at.tzinfo is None: reference_at=reference_at.replace(tzinfo=timezone.utc)
-    max_window=max((r.window_minutes for r in rules),default=120)
     hosts=db.scalars(select(Host).where(Host.status==0)).all()
     host_sites={}
     for host in hosts:
         parsed=_parse_site(host.technical_name or host.visible_name)
         if parsed: host_sites[int(host.zabbix_hostid)]=parsed["site_key"]
-    start_all=reference_at-timedelta(minutes=max_window)
+    # The rule window describes the maximum span between the first and
+    # last event in a chain, not the age of the incident. Keep enough
+    # history to evaluate incidents that are still active after the window.
+    history_from=reference_at-timedelta(days=7)
     history=db.scalars(select(ProblemEvent).where(
-        ProblemEvent.started_at>=start_all,
+        ProblemEvent.started_at>=history_from,
         ProblemEvent.started_at<=reference_at,
     ).order_by(ProblemEvent.started_at.asc())).all()
     active=db.scalars(select(Problem).where(
         Problem.active.is_(True),
-        Problem.started_at>=start_all,
         Problem.started_at<=reference_at,
     ).order_by(Problem.started_at.asc())).all()
 
@@ -57,16 +58,25 @@ def user_correlation(db: Session, site_key: str, reference_at: datetime | None =
     for rule in rules:
         steps=rule.steps or []
         if len(steps)<2: continue
-        start=reference_at-timedelta(minutes=rule.window_minutes)
-        candidates=[e for e in site_events if e.started_at>=start]
-        evidence=[]; pos=0
-        for event in candidates:
-            if _step_matches(event,steps[pos]):
-                evidence.append({"eventid":str(event.zabbix_eventid),"triggerid":str(event.zabbix_triggerid) if event.zabbix_triggerid else None,"name":event.name,"started_at":event.started_at})
-                pos+=1
-                if pos==len(steps): break
-        if pos==len(steps):
-            span=round((evidence[-1]["started_at"]-evidence[0]["started_at"]).total_seconds()/60,1)
-            matches.append({"type":"user_rule","rule_id":rule.id,"probable_cause":rule.name,"description":rule.description,"confidence":"configured","window_minutes":rule.window_minutes,"matched_steps":len(steps),"span_minutes":span,"evidence":evidence,"summary":f"Совпала цепочка {len(steps)} событий за {span} мин."})
+        # Try each matching first step. Subsequent steps must occur in
+        # order and no later than rule.window_minutes after that first step.
+        for first_index,event in enumerate(site_events):
+            if not _step_matches(event,steps[0]):
+                continue
+            evidence=[{"eventid":str(event.zabbix_eventid),"triggerid":str(event.zabbix_triggerid) if event.zabbix_triggerid else None,"name":event.name,"started_at":event.started_at}]
+            pos=1
+            deadline=event.started_at+timedelta(minutes=rule.window_minutes)
+            for candidate in site_events[first_index+1:]:
+                if candidate.started_at>deadline:
+                    break
+                if pos<len(steps) and _step_matches(candidate,steps[pos]):
+                    evidence.append({"eventid":str(candidate.zabbix_eventid),"triggerid":str(candidate.zabbix_triggerid) if candidate.zabbix_triggerid else None,"name":candidate.name,"started_at":candidate.started_at})
+                    pos+=1
+                    if pos==len(steps):
+                        break
+            if pos==len(steps):
+                span=round((evidence[-1]["started_at"]-evidence[0]["started_at"]).total_seconds()/60,1)
+                matches.append({"type":"user_rule","rule_id":rule.id,"probable_cause":rule.name,"description":rule.description,"confidence":"configured","window_minutes":rule.window_minutes,"matched_steps":len(steps),"span_minutes":span,"evidence":evidence,"summary":f"Совпала цепочка {len(steps)} событий за {span} мин."})
+                break
     if not matches: return None
     return sorted(matches,key=lambda x:(-x["matched_steps"],x["span_minutes"],x["rule_id"]))[0]
