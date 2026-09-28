@@ -210,23 +210,50 @@ def problems(limit: int = Query(100, ge=1, le=1000), db: Session = Depends(get_d
 @app.get("/api/v1/correlation/event-types")
 def correlation_event_types(q: str | None = None, limit: int = Query(80, ge=1, le=200), db: Session = Depends(get_db)) -> dict:
     since = datetime.now(timezone.utc) - timedelta(days=7)
-    stmt = select(ProblemEvent).where(ProblemEvent.started_at >= since)
-    if q:
-        stmt = stmt.where(ProblemEvent.name.ilike(f"%{q}%"))
-    events = db.scalars(stmt.order_by(ProblemEvent.started_at.desc()).limit(3000)).all()
+    history = db.scalars(
+        select(ProblemEvent)
+        .where(ProblemEvent.started_at >= since)
+        .order_by(ProblemEvent.started_at.desc())
+        .limit(10000)
+    ).all()
+    active = db.scalars(
+        select(Problem)
+        .where(Problem.active.is_(True))
+        .order_by(Problem.started_at.desc())
+        .limit(2000)
+    ).all()
+
+    query = (q or "").strip().lower()
     grouped = {}
-    for e in events:
+    for e in [*active, *history]:
+        hosts = e.hosts or []
+        host_names = [str(h.get("name") or h.get("host") or "") for h in hosts]
+        tags = e.tags or []
+        haystack = " ".join([
+            str(e.name or ""),
+            *host_names,
+            *[f"{t.get('tag', '')} {t.get('value', '')}" for t in tags],
+        ]).lower()
+        if query and query not in haystack:
+            continue
         key = (e.zabbix_triggerid, e.name)
-        item = grouped.setdefault(key, {"triggerid": str(e.zabbix_triggerid) if e.zabbix_triggerid else None, "name": e.name, "count": 0, "last_seen": e.started_at, "hosts": [], "tags": e.tags or []})
+        item = grouped.setdefault(key, {
+            "triggerid": str(e.zabbix_triggerid) if e.zabbix_triggerid else None,
+            "name": e.name or "",
+            "count": 0,
+            "last_seen": e.started_at,
+            "hosts": [],
+            "tags": tags,
+        })
         item["count"] += 1
         if e.started_at > item["last_seen"]:
             item["last_seen"] = e.started_at
-        for h in e.hosts or []:
-            hn = h.get("name") or h.get("host")
+        for hn in host_names:
             if hn and hn not in item["hosts"] and len(item["hosts"]) < 4:
                 item["hosts"].append(hn)
-    items = sorted(grouped.values(), key=lambda x: (-x["count"], x["name"]))[:limit]
-    return {"count": len(items), "items": items}
+
+    items = sorted(grouped.values(), key=lambda x: (-x["count"], x["name"].lower()))[:limit]
+    return {"count": len(items), "items": items, "query": q or ""}
 
 
 @app.get("/api/v1/correlation/rules")
