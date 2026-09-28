@@ -85,13 +85,13 @@ class ZabbixClient:
         return triggers
 
     async def _active_trigger_context(self, trigger_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
-        """Return hosts only for enabled triggers that belong to enabled hosts."""
+        """Return hosts only for enabled triggers currently in PROBLEM state on enabled hosts."""
         active: dict[str, list[dict[str, Any]]] = {}
         for batch in self._chunks(trigger_ids, 100):
             triggers = await self.call("trigger.get", {
-                "output": ["triggerid", "status"],
+                "output": ["triggerid", "status", "value"],
                 "triggerids": batch,
-                "filter": {"status": 0},
+                "filter": {"status": 0, "value": 1},
                 "selectHosts": ["hostid", "host", "name", "status"],
             })
             for trigger in triggers:
@@ -153,9 +153,10 @@ class ZabbixClient:
         trigger_ids = list({str(p["objectid"]) for p in problems if p.get("objectid")})
         active_triggers = await self._active_trigger_context(trigger_ids) if trigger_ids else {}
 
-        # An operational problem must belong to an enabled trigger and at least
-        # one enabled host. Disabled trigger/host events remain in our database
-        # history, but are not returned as current active problems.
+        # An operational problem must belong to an enabled trigger that is
+        # currently in PROBLEM state (value=1) and at least one enabled host.
+        # This prevents stale unresolved problem.get events from remaining
+        # active locally after the trigger itself has returned to OK.
         active_problems: list[dict[str, Any]] = []
         for problem in problems:
             trigger_id = str(problem.get("objectid", ""))
