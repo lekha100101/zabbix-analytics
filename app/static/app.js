@@ -1,7 +1,7 @@
 const $=s=>document.querySelector(s);const $$=s=>document.querySelectorAll(s);
 function toast(t){const e=$('#toast');e.textContent=t;e.style.display='block';setTimeout(()=>e.style.display='none',2500)}
 async function api(url,opt={}){const r=await fetch(url,opt);if(!r.ok){let x;try{x=await r.json()}catch{x={detail:r.statusText}}throw new Error(x.detail||r.statusText)}return r.json()}
-$$('.nav').forEach(b=>b.onclick=()=>{$$('.nav,.tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');$('#'+b.dataset.tab).classList.add('active');if(b.dataset.tab==='attention')loadAttention();if(b.dataset.tab==='deferred')loadDeferred();if(b.dataset.tab==='sites')loadSites();if(b.dataset.tab==='instability')loadInstability();if(b.dataset.tab==='criticality'){loadHosts();loadGroups()}if(b.dataset.tab==='correlation'){loadCorrelationEvents();loadCorrelationRules()}if(b.dataset.tab==='scoring')loadRules()});
+$$('.nav').forEach(b=>b.onclick=()=>{$$('.nav,.tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');$('#'+b.dataset.tab).classList.add('active');if(b.dataset.tab==='attention')loadAttention();if(b.dataset.tab==='deferred')loadDeferred();if(b.dataset.tab==='sites')loadSites();if(b.dataset.tab==='instability')loadInstability();if(b.dataset.tab==='criticality'){loadHosts();loadGroups()}if(b.dataset.tab==='correlation'){initCorrelationSearch();loadCorrelationEvents();loadCorrelationRules()}if(b.dataset.tab==='scoring')loadRules()});
 const sev={0:'Not classified',1:'Information',2:'Warning',3:'Average',4:'High',5:'Disaster'};
 function age(d){let s=(Date.now()-new Date(d))/1000;if(s<3600)return Math.floor(s/60)+' мин';if(s<86400)return Math.floor(s/3600)+' ч';return Math.floor(s/86400)+' д'}
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
@@ -25,7 +25,7 @@ loadProblems();
 
 let corrSteps=[],corrEditing=null;
 function renderCorrelationChain(){const el=$('#corrChain');if(!el)return;el.innerHTML=corrSteps.length?corrSteps.map((x,i)=>'<div class="corr-step"><div class="corr-num">'+(i+1)+'</div><div class="corr-step-text"><b>'+esc(x.name)+'</b><small>'+esc((x.hosts||[]).join(', ')||'Любой хост объекта')+'</small></div><div class="corr-step-actions"><button onclick="moveCorr('+i+',-1)" '+(i===0?'disabled':'')+'>←</button><button onclick="moveCorr('+i+',1)" '+(i===corrSteps.length-1?'disabled':'')+'>→</button><button onclick="removeCorr('+i+')">×</button></div></div>').join('<div class="corr-arrow">→</div>'):'<div class="corr-empty">Добавьте минимум два события из библиотеки слева</div>'}
-async function loadCorrelationEvents(){try{const q=encodeURIComponent($('#corrSearch')?.value||'');const d=await api('/api/v1/correlation/event-types?q='+q+'&limit=60');$('#corrEvents').innerHTML=d.items.map((x,i)=>'<div class="corr-event"><div><b>'+esc(x.name)+'</b><small>'+x.count+' событий · '+esc((x.hosts||[]).slice(0,2).join(', '))+'</small></div><button data-ci="'+i+'">+</button></div>').join('')||'<div class="muted">События не найдены</div>';window._corrEvents=d.items;$$('#corrEvents [data-ci]').forEach(b=>b.onclick=()=>addCorr(+b.dataset.ci))}catch(e){toast(e.message)}}
+async function loadCorrelationEvents(){try{const input=$('#corrSearch');const q=encodeURIComponent(input?.value.trim()||'');const box=$('#corrEvents');box.innerHTML='<div class="muted">Поиск...</div>';const d=await api('/api/v1/correlation/event-types?q='+q+'&limit=60');box.innerHTML=d.items.map((x,i)=>'<div class="corr-event"><div><b>'+esc(x.name)+'</b><small>'+x.count+' событий · '+esc((x.hosts||[]).slice(0,2).join(', '))+'</small></div><button data-ci="'+i+'">+</button></div>').join('')||'<div class="muted">Ничего не найдено. Ищите по событию, хосту или тегу.</div>';window._corrEvents=d.items;$('#corrEvents [data-ci]').forEach(b=>b.onclick=()=>addCorr(+b.dataset.ci))}catch(e){$('#corrEvents').innerHTML='<div class="muted">Ошибка поиска: '+esc(e.message)+'</div>';toast(e.message)}}
 function addCorr(i){const x=window._corrEvents[i];if(!x)return;corrSteps.push({triggerid:x.triggerid,name:x.name,hosts:x.hosts||[]});renderCorrelationChain()}
 function removeCorr(i){corrSteps.splice(i,1);renderCorrelationChain()}
 function moveCorr(i,d){const j=i+d;if(j<0||j>=corrSteps.length)return;[corrSteps[i],corrSteps[j]]=[corrSteps[j],corrSteps[i]];renderCorrelationChain()}
@@ -34,3 +34,12 @@ async function saveCorrelation(){const name=$('#corrName').value.trim();if(!name
 async function loadCorrelationRules(){try{const d=await api('/api/v1/correlation/rules');window._corrRules=d.items;$('#corrRules').innerHTML=d.items.map((x,i)=>'<div class="corr-rule"><div><b>'+esc(x.name)+'</b><small>'+x.steps.length+' шага · '+x.window_minutes+' мин</small></div><div><button onclick="editCorrelation('+i+')">Изменить</button><button onclick="deleteCorrelation('+x.id+')">×</button></div></div>').join('')||'<div class="muted">Правил пока нет</div>'}catch(e){toast(e.message)}}
 function editCorrelation(i){const x=window._corrRules[i];corrEditing=x.id;corrSteps=JSON.parse(JSON.stringify(x.steps||[]));$('#corrName').value=x.name;$('#corrDescription').value=x.description||'';$('#corrWindow').value=x.window_minutes;renderCorrelationChain()}
 async function deleteCorrelation(id){if(!confirm('Удалить правило корреляции?'))return;try{await api('/api/v1/correlation/rules/'+id,{method:'DELETE'});toast('Правило удалено');loadCorrelationRules()}catch(e){toast(e.message)}}
+
+let corrSearchTimer=null;
+function initCorrelationSearch(){
+  const input=$('#corrSearch');
+  if(!input||input.dataset.ready)return;
+  input.dataset.ready='1';
+  input.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();clearTimeout(corrSearchTimer);loadCorrelationEvents()}});
+  input.addEventListener('input',()=>{clearTimeout(corrSearchTimer);corrSearchTimer=setTimeout(loadCorrelationEvents,350)});
+}
