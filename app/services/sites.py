@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import Host, Problem
-from app.services.correlation import power_correlation
+from app.services.correlation import user_correlation
 
 
 # Expected convention: <equipment>-<region>-<site>, e.g. ILO5-ZHET-MB.
@@ -224,9 +224,7 @@ def site_analytics(db: Session) -> list[dict]:
 
         probable_cause = None
         root_cause = None
-        outage_times = [p["started_at"] for p in problems_for_site if p["availability"]]
-        if outage_times:
-            root_cause = power_correlation(db, site["site_key"], min(outage_times))
+        root_cause = user_correlation(db, site["site_key"], now)
         if root_cause:
             probable_cause = root_cause["probable_cause"]
         elif gateway_affected and unavailable_ratio >= 50:
