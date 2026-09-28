@@ -65,7 +65,7 @@
 
   <section id="correlation" class="tab">
     <div class="toolbar"><h1>Конструктор корреляций</h1><button onclick="newCorrelation()">Новое правило</button></div>
-    <p class="muted">Соберите последовательность событий слева направо. Правило срабатывает, когда события происходят в заданном порядке на одном объекте в пределах временного окна.</p>
+    <p class="muted">Соберите общее правило из шаблонов событий. Оно применяется ко всем объектам: совпадения ищутся на каждом объекте отдельно, независимо от конкретных хостов и ID триггеров.</p>
     <div class="corr-layout">
       <div class="panel corr-library"><h2>События</h2><div class="search"><input id="corrSearch" type="text" placeholder="Например: battery, voltage, ICMP"><button onclick="loadCorrelationEvents()">Найти</button></div><div id="corrEvents"></div></div>
       <div class="panel corr-editor"><div class="corr-head"><input id="corrName" type="text" placeholder="Название причины, например: Отсутствие электропитания"><label>Окно <input id="corrWindow" type="number" min="1" max="1440" value="120"> мин</label></div><div id="corrChain" class="corr-chain"></div><textarea id="corrDescription" placeholder="Комментарий к правилу (необязательно)"></textarea><div class="corr-actions"><button onclick="saveCorrelation()">Сохранить правило</button><button onclick="newCorrelation()">Очистить</button></div></div>
@@ -79,6 +79,6 @@
   </section>
 </main>
 <div id="toast"></div>
-<script src="/static/app.js?v=0.10.1"></script>
+<script src="/static/app.js?v=0.10.2"></script>
 </body>
 </html>
