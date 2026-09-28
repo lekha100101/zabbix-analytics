@@ -16,6 +16,7 @@
     <button class="nav" data-tab="sites">Объекты</button>
     <button class="nav" data-tab="instability">Нестабильность</button>
     <button class="nav" data-tab="criticality">Критичность</button>
+    <button class="nav" data-tab="correlation">Корреляции</button>
     <button class="nav" data-tab="scoring">Scoring</button>
   </nav>
 </header>
@@ -58,6 +59,17 @@
     <div class="grid2">
       <div class="panel"><h2>Хосты</h2><div class="search"><input id="hostSearch" placeholder="Поиск хоста"><button onclick="loadHosts()">Найти</button></div><div id="hostsList"></div></div>
       <div class="panel"><h2>Группы хостов</h2><div id="groupsList"></div></div>
+    </div>
+  </section>
+
+
+  <section id="correlation" class="tab">
+    <div class="toolbar"><h1>Конструктор корреляций</h1><button onclick="newCorrelation()">Новое правило</button></div>
+    <p class="muted">Соберите последовательность событий слева направо. Правило срабатывает, когда события происходят в заданном порядке на одном объекте в пределах временного окна.</p>
+    <div class="corr-layout">
+      <div class="panel corr-library"><h2>События</h2><div class="search"><input id="corrSearch" type="text" placeholder="Например: battery, voltage, ICMP"><button onclick="loadCorrelationEvents()">Найти</button></div><div id="corrEvents"></div></div>
+      <div class="panel corr-editor"><div class="corr-head"><input id="corrName" type="text" placeholder="Название причины, например: Отсутствие электропитания"><label>Окно <input id="corrWindow" type="number" min="1" max="1440" value="120"> мин</label></div><div id="corrChain" class="corr-chain"></div><textarea id="corrDescription" placeholder="Комментарий к правилу (необязательно)"></textarea><div class="corr-actions"><button onclick="saveCorrelation()">Сохранить правило</button><button onclick="newCorrelation()">Очистить</button></div></div>
+      <div class="panel corr-saved"><h2>Правила</h2><div id="corrRules"></div></div>
     </div>
   </section>
 
