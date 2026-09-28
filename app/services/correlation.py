@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-from app.models import CorrelationRule, Host, ProblemEvent
+from app.models import CorrelationRule, Host, Problem, ProblemEvent
 
 def _parse_site(name):
     value=(name or "").strip(); parts=value.split("-")
@@ -35,10 +35,23 @@ def user_correlation(db: Session, site_key: str, reference_at: datetime | None =
     for host in hosts:
         parsed=_parse_site(host.technical_name or host.visible_name)
         if parsed: host_sites[int(host.zabbix_hostid)]=parsed["site_key"]
-    events=db.scalars(select(ProblemEvent).where(
-        ProblemEvent.started_at>=reference_at-timedelta(minutes=max_window),
+    start_all=reference_at-timedelta(minutes=max_window)
+    history=db.scalars(select(ProblemEvent).where(
+        ProblemEvent.started_at>=start_all,
         ProblemEvent.started_at<=reference_at,
     ).order_by(ProblemEvent.started_at.asc())).all()
+    active=db.scalars(select(Problem).where(
+        Problem.active.is_(True),
+        Problem.started_at>=start_all,
+        Problem.started_at<=reference_at,
+    ).order_by(Problem.started_at.asc())).all()
+
+    # Active problems and historical events overlap after sync. Keep one
+    # copy per Zabbix event ID so a single event cannot satisfy two steps.
+    merged={}
+    for event in [*history,*active]:
+        merged[str(event.zabbix_eventid)]=event
+    events=sorted(merged.values(),key=lambda e:e.started_at)
     site_events=[e for e in events if site_key in _event_site_keys(e,host_sites)]
     matches=[]
     for rule in rules:
