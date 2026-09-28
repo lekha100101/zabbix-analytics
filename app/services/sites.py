@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import Host, Problem
-from app.services.correlation import user_correlation
+from app.services.correlation import user_correlations
 
 
 # Expected convention: <equipment>-<region>-<site>, e.g. ILO5-ZHET-MB.
@@ -183,6 +183,11 @@ def site_analytics(db: Session) -> list[dict]:
                 "hosts": [h for h in matched_hosts if h["site_key"] == key],
             })
 
+    # Correlation data is loaded/evaluated once for the whole request.
+    # Previously this ran the same large DB queries once per site.
+    now = datetime.now(timezone.utc)
+    correlation_by_site = user_correlations(db, set(sites.keys()), now)
+
     result = []
     for site in sites.values():
         problems_for_site = sorted(site["problems"], key=lambda p: (-p["impact_score"], p["started_at"]))
@@ -194,7 +199,6 @@ def site_analytics(db: Session) -> list[dict]:
         unavailable = len(site["unavailable_hostids"])
         unavailable_ratio = round((unavailable / site["hosts_total"]) * 100, 1) if site["hosts_total"] else 0.0
 
-        now = datetime.now(timezone.utc)
         burst_5m = sum(1 for p in problems_for_site if (now - p["started_at"]).total_seconds() <= 300)
         burst_15m = sum(1 for p in problems_for_site if (now - p["started_at"]).total_seconds() <= 900)
 
@@ -223,8 +227,7 @@ def site_analytics(db: Session) -> list[dict]:
             category_counts[p["category"]] += 1
 
         probable_cause = None
-        root_cause = None
-        root_cause = user_correlation(db, site["site_key"], now)
+        root_cause = correlation_by_site.get(site["site_key"])
         if root_cause:
             probable_cause = root_cause["probable_cause"]
         elif gateway_affected and unavailable_ratio >= 50:
