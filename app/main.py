@@ -1,5 +1,5 @@
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import Base, engine, get_db
-from app.models import Host, HostGroup, Problem, ScoringRule, Trigger
+from app.models import CorrelationRule, Host, HostGroup, Problem, ProblemEvent, ScoringRule, Trigger
 from app.services.scoring import ensure_default_rules, recalculate_all
 from app.services.instability import instability_analytics
 from app.services.sites import site_analytics
@@ -18,7 +18,7 @@ from app.services.sync import sync_all
 from app.services.zabbix import ZabbixClient
 
 settings = get_settings()
-app = FastAPI(title=settings.app_name, version="0.9.0")
+app = FastAPI(title=settings.app_name, version="0.10.0")
 BASE_DIR = Path(__file__).resolve().parent
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
@@ -40,7 +40,7 @@ def health(db: Session = Depends(get_db)) -> dict:
         db.execute(text("SELECT 1")); database = "ok"
     except Exception as exc:
         database = f"error: {exc}"
-    return {"status": "ok" if database == "ok" else "degraded", "service": settings.app_name, "version": "0.9.0", "database": database}
+    return {"status": "ok" if database == "ok" else "degraded", "service": settings.app_name, "version": "0.10.0", "database": database}
 
 
 @app.get("/api/v1/zabbix/status")
@@ -205,3 +205,64 @@ def problems(limit: int = Query(100, ge=1, le=1000), db: Session = Depends(get_d
     items = db.scalars(select(Problem).where(Problem.active.is_(True), ((Problem.deferred_until.is_(None)) | (Problem.deferred_until <= datetime.now(timezone.utc)))).order_by(Problem.impact_score.desc(), Problem.started_at.asc()).limit(limit)).all()
     result = [{"eventid": str(i.zabbix_eventid), "objectid": str(i.zabbix_triggerid) if i.zabbix_triggerid else None, "name": i.name, "severity": i.severity, "acknowledged": i.acknowledged, "started_at": i.started_at, "hosts": i.hosts, "tags": i.tags, "impact_score": i.impact_score, "score_breakdown": i.score_breakdown} for i in items]
     return {"count": len(result), "items": result}
+
+
+@app.get("/api/v1/correlation/event-types")
+def correlation_event_types(q: str | None = None, limit: int = Query(80, ge=1, le=200), db: Session = Depends(get_db)) -> dict:
+    since = datetime.now(timezone.utc) - timedelta(days=7)
+    stmt = select(ProblemEvent).where(ProblemEvent.started_at >= since)
+    if q:
+        stmt = stmt.where(ProblemEvent.name.ilike(f"%{q}%"))
+    events = db.scalars(stmt.order_by(ProblemEvent.started_at.desc()).limit(3000)).all()
+    grouped = {}
+    for e in events:
+        key = (e.zabbix_triggerid, e.name)
+        item = grouped.setdefault(key, {"triggerid": str(e.zabbix_triggerid) if e.zabbix_triggerid else None, "name": e.name, "count": 0, "last_seen": e.started_at, "hosts": [], "tags": e.tags or []})
+        item["count"] += 1
+        if e.started_at > item["last_seen"]:
+            item["last_seen"] = e.started_at
+        for h in e.hosts or []:
+            hn = h.get("name") or h.get("host")
+            if hn and hn not in item["hosts"] and len(item["hosts"]) < 4:
+                item["hosts"].append(hn)
+    items = sorted(grouped.values(), key=lambda x: (-x["count"], x["name"]))[:limit]
+    return {"count": len(items), "items": items}
+
+
+@app.get("/api/v1/correlation/rules")
+def correlation_rules(db: Session = Depends(get_db)) -> dict:
+    items = db.scalars(select(CorrelationRule).order_by(CorrelationRule.name)).all()
+    return {"count": len(items), "items": [{"id": r.id, "name": r.name, "description": r.description, "window_minutes": r.window_minutes, "enabled": r.enabled, "steps": r.steps} for r in items]}
+
+
+@app.post("/api/v1/correlation/rules")
+def create_correlation_rule(payload: dict = Body(...), db: Session = Depends(get_db)) -> dict:
+    name = str(payload.get("name") or "").strip()
+    steps = payload.get("steps") or []
+    if not name or len(steps) < 2:
+        raise HTTPException(status_code=400, detail="Укажите название и минимум два события")
+    now = datetime.now(timezone.utc)
+    rule = CorrelationRule(name=name, description=str(payload.get("description") or "").strip() or None, window_minutes=max(1, min(1440, int(payload.get("window_minutes", 120)))), enabled=bool(payload.get("enabled", True)), steps=steps, created_at=now, updated_at=now)
+    db.add(rule); db.commit(); db.refresh(rule)
+    return {"status": "ok", "id": rule.id}
+
+
+@app.put("/api/v1/correlation/rules/{rule_id}")
+def update_correlation_rule(rule_id: int, payload: dict = Body(...), db: Session = Depends(get_db)) -> dict:
+    rule = db.get(CorrelationRule, rule_id)
+    if not rule: raise HTTPException(status_code=404, detail="Правило не найдено")
+    for field in ("name", "description", "enabled"):
+        if field in payload: setattr(rule, field, payload[field])
+    if "window_minutes" in payload: rule.window_minutes = max(1, min(1440, int(payload["window_minutes"])))
+    if "steps" in payload:
+        if len(payload["steps"]) < 2: raise HTTPException(status_code=400, detail="Нужно минимум два события")
+        rule.steps = payload["steps"]
+    rule.updated_at = datetime.now(timezone.utc); db.commit()
+    return {"status": "ok", "id": rule.id}
+
+
+@app.delete("/api/v1/correlation/rules/{rule_id}")
+def delete_correlation_rule(rule_id: int, db: Session = Depends(get_db)) -> dict:
+    rule = db.get(CorrelationRule, rule_id)
+    if not rule: raise HTTPException(status_code=404, detail="Правило не найдено")
+    db.delete(rule); db.commit(); return {"status": "ok"}
