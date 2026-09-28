@@ -23,23 +23,111 @@ async function loadRules(){try{const d=await api('/api/v1/scoring/rules');$('#ru
 async function saveRule(id){try{await api(`/api/v1/scoring/rules/${id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({points:+$('#r'+id).value,enabled:$('#e'+id).checked})});toast('Правило сохранено')}catch(e){toast(e.message)}}
 loadProblems();
 
-let corrSteps=[],corrEditing=null;
-function renderCorrelationChain(){const el=$('#corrChain');if(!el)return;el.innerHTML=corrSteps.length?corrSteps.map((x,i)=>'<div class="corr-step"><div class="corr-num">'+(i+1)+'</div><div class="corr-step-text"><b>'+esc(x.name)+'</b><small>'+esc((x.hosts||[]).join(', ')||'Любой хост объекта')+'</small></div><div class="corr-step-actions"><button onclick="moveCorr('+i+',-1)" '+(i===0?'disabled':'')+'>←</button><button onclick="moveCorr('+i+',1)" '+(i===corrSteps.length-1?'disabled':'')+'>→</button><button onclick="removeCorr('+i+')">×</button></div></div>').join('<div class="corr-arrow">→</div>'):'<div class="corr-empty">Добавьте минимум два события из библиотеки слева</div>'}
-async function loadCorrelationEvents(){try{const input=$('#corrSearch');const q=encodeURIComponent(input?.value.trim()||'');const box=$('#corrEvents');box.innerHTML='<div class="muted">Поиск...</div>';const d=await api('/api/v1/correlation/event-types?q='+q+'&limit=60');box.innerHTML=d.items.map((x,i)=>'<div class="corr-event"><div><b>'+esc(x.name)+'</b><small>'+x.count+' событий · '+esc((x.hosts||[]).slice(0,2).join(', '))+'</small></div><button data-ci="'+i+'">+</button></div>').join('')||'<div class="muted">Ничего не найдено. Ищите по событию, хосту или тегу.</div>';window._corrEvents=d.items;$('#corrEvents [data-ci]').forEach(b=>b.onclick=()=>addCorr(+b.dataset.ci))}catch(e){$('#corrEvents').innerHTML='<div class="muted">Ошибка поиска: '+esc(e.message)+'</div>';toast(e.message)}}
-function addCorr(i){const x=window._corrEvents[i];if(!x)return;corrSteps.push({triggerid:x.triggerid,name:x.name,hosts:x.hosts||[]});renderCorrelationChain()}
-function removeCorr(i){corrSteps.splice(i,1);renderCorrelationChain()}
-function moveCorr(i,d){const j=i+d;if(j<0||j>=corrSteps.length)return;[corrSteps[i],corrSteps[j]]=[corrSteps[j],corrSteps[i]];renderCorrelationChain()}
-function newCorrelation(){corrEditing=null;corrSteps=[];if($('#corrName'))$('#corrName').value='';if($('#corrDescription'))$('#corrDescription').value='';if($('#corrWindow'))$('#corrWindow').value=120;renderCorrelationChain()}
-async function saveCorrelation(){const name=$('#corrName').value.trim();if(!name||corrSteps.length<2){toast('Укажите название и добавьте минимум два события');return}const body={name,description:$('#corrDescription').value.trim(),window_minutes:+$('#corrWindow').value||120,steps:corrSteps,enabled:true};try{await api(corrEditing?'/api/v1/correlation/rules/'+corrEditing:'/api/v1/correlation/rules',{method:corrEditing?'PUT':'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});toast('Правило сохранено');newCorrelation();loadCorrelationRules()}catch(e){toast(e.message)}}
-async function loadCorrelationRules(){try{const d=await api('/api/v1/correlation/rules');window._corrRules=d.items;$('#corrRules').innerHTML=d.items.map((x,i)=>'<div class="corr-rule"><div><b>'+esc(x.name)+'</b><small>'+x.steps.length+' шага · '+x.window_minutes+' мин</small></div><div><button onclick="editCorrelation('+i+')">Изменить</button><button onclick="deleteCorrelation('+x.id+')">×</button></div></div>').join('')||'<div class="muted">Правил пока нет</div>'}catch(e){toast(e.message)}}
-function editCorrelation(i){const x=window._corrRules[i];corrEditing=x.id;corrSteps=JSON.parse(JSON.stringify(x.steps||[]));$('#corrName').value=x.name;$('#corrDescription').value=x.description||'';$('#corrWindow').value=x.window_minutes;renderCorrelationChain()}
-async function deleteCorrelation(id){if(!confirm('Удалить правило корреляции?'))return;try{await api('/api/v1/correlation/rules/'+id,{method:'DELETE'});toast('Правило удалено');loadCorrelationRules()}catch(e){toast(e.message)}}
+let corrSteps = [];
+let corrEditing = null;
+let corrSearchTimer = null;
 
-let corrSearchTimer=null;
-function initCorrelationSearch(){
-  const input=$('#corrSearch');
-  if(!input||input.dataset.ready)return;
-  input.dataset.ready='1';
-  input.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();clearTimeout(corrSearchTimer);loadCorrelationEvents()}});
-  input.addEventListener('input',()=>{clearTimeout(corrSearchTimer);corrSearchTimer=setTimeout(loadCorrelationEvents,350)});
+function renderCorrelationChain() {
+  const el = $('#corrChain');
+  if (!el) return;
+  if (!corrSteps.length) {
+    el.innerHTML = '<div class="corr-empty">Добавьте минимум два события из библиотеки слева</div>';
+    return;
+  }
+  el.innerHTML = corrSteps.map((x, i) =>
+    '<div class="corr-step"><div class="corr-num">' + (i + 1) + '</div>' +
+    '<div class="corr-step-text"><b>' + esc(x.name) + '</b><small>' +
+    esc((x.hosts || []).join(', ') || 'Любой хост объекта') + '</small></div>' +
+    '<div class="corr-step-actions"><button type="button" onclick="moveCorr(' + i + ',-1)">←</button>' +
+    '<button type="button" onclick="moveCorr(' + i + ',1)">→</button>' +
+    '<button type="button" onclick="removeCorr(' + i + ')">×</button></div></div>'
+  ).join('<div class="corr-arrow">→</div>');
+}
+
+async function loadCorrelationEvents() {
+  const box = $('#corrEvents');
+  if (!box) return;
+  try {
+    const input = $('#corrSearch');
+    const q = encodeURIComponent(input ? input.value.trim() : '');
+    box.innerHTML = '<div class="muted">Поиск...</div>';
+    const d = await api('/api/v1/correlation/event-types?q=' + q + '&limit=60');
+    window._corrEvents = d.items || [];
+    box.innerHTML = window._corrEvents.map((x, i) =>
+      '<div class="corr-event"><div><b>' + esc(x.name) + '</b><small>' +
+      x.count + ' событий · ' + esc((x.hosts || []).slice(0, 2).join(', ')) +
+      '</small></div><button type="button" data-ci="' + i + '">+</button></div>'
+    ).join('') || '<div class="muted">Ничего не найдено. Ищите по событию, хосту или тегу.</div>';
+    $$('#corrEvents [data-ci]').forEach(b => {
+      b.addEventListener('click', () => addCorr(Number(b.dataset.ci)));
+    });
+  } catch (e) {
+    box.innerHTML = '<div class="muted">Ошибка поиска: ' + esc(e.message) + '</div>';
+    toast(e.message);
+  }
+}
+
+function addCorr(i) {
+  const x = (window._corrEvents || [])[i];
+  if (!x) return;
+  corrSteps.push({triggerid: x.triggerid, name: x.name, hosts: x.hosts || []});
+  renderCorrelationChain();
+}
+function removeCorr(i) { corrSteps.splice(i, 1); renderCorrelationChain(); }
+function moveCorr(i, d) {
+  const j = i + d;
+  if (j < 0 || j >= corrSteps.length) return;
+  const tmp = corrSteps[i]; corrSteps[i] = corrSteps[j]; corrSteps[j] = tmp;
+  renderCorrelationChain();
+}
+function newCorrelation() {
+  corrEditing = null; corrSteps = [];
+  if ($('#corrName')) $('#corrName').value = '';
+  if ($('#corrDescription')) $('#corrDescription').value = '';
+  if ($('#corrWindow')) $('#corrWindow').value = 120;
+  renderCorrelationChain();
+}
+async function saveCorrelation() {
+  const name = $('#corrName').value.trim();
+  if (!name || corrSteps.length < 2) { toast('Укажите название и добавьте минимум два события'); return; }
+  const body = {name, description: $('#corrDescription').value.trim(), window_minutes: Number($('#corrWindow').value) || 120, steps: corrSteps, enabled: true};
+  try {
+    await api(corrEditing ? '/api/v1/correlation/rules/' + corrEditing : '/api/v1/correlation/rules', {
+      method: corrEditing ? 'PUT' : 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+    });
+    toast('Правило сохранено'); newCorrelation(); await loadCorrelationRules();
+  } catch (e) { toast(e.message); }
+}
+async function loadCorrelationRules() {
+  try {
+    const d = await api('/api/v1/correlation/rules');
+    window._corrRules = d.items || [];
+    $('#corrRules').innerHTML = window._corrRules.map((x, i) =>
+      '<div class="corr-rule"><div><b>' + esc(x.name) + '</b><small>' + x.steps.length + ' шага · ' + x.window_minutes +
+      ' мин</small></div><div><button type="button" onclick="editCorrelation(' + i + ')">Изменить</button>' +
+      '<button type="button" onclick="deleteCorrelation(' + x.id + ')">×</button></div></div>'
+    ).join('') || '<div class="muted">Правил пока нет</div>';
+  } catch (e) { toast(e.message); }
+}
+function editCorrelation(i) {
+  const x = (window._corrRules || [])[i]; if (!x) return;
+  corrEditing = x.id; corrSteps = JSON.parse(JSON.stringify(x.steps || []));
+  $('#corrName').value = x.name; $('#corrDescription').value = x.description || ''; $('#corrWindow').value = x.window_minutes;
+  renderCorrelationChain();
+}
+async function deleteCorrelation(id) {
+  if (!confirm('Удалить правило корреляции?')) return;
+  try { await api('/api/v1/correlation/rules/' + id, {method: 'DELETE'}); toast('Правило удалено'); await loadCorrelationRules(); }
+  catch (e) { toast(e.message); }
+}
+function initCorrelationSearch() {
+  const input = $('#corrSearch');
+  if (!input || input.dataset.ready) return;
+  input.dataset.ready = '1';
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); clearTimeout(corrSearchTimer); loadCorrelationEvents(); }
+  });
+  input.addEventListener('input', () => {
+    clearTimeout(corrSearchTimer); corrSearchTimer = setTimeout(loadCorrelationEvents, 350);
+  });
 }
