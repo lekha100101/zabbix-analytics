@@ -17,10 +17,12 @@ def _event_site_keys(event, host_sites):
     return keys
 
 def _step_matches(event, step):
-    triggerid=step.get("triggerid")
-    if triggerid and event.zabbix_triggerid and str(event.zabbix_triggerid)==str(triggerid): return True
-    expected=(step.get("name") or "").strip().lower()
-    return bool(expected and expected==(event.name or "").strip().lower())
+    # Correlation rules are global templates. Never bind matching to a
+    # concrete Zabbix trigger ID or host. A step is a case-insensitive
+    # text pattern that can match the same event type on every site.
+    pattern=(step.get("pattern") or step.get("name") or "").strip().lower()
+    actual=(event.name or "").strip().lower()
+    return bool(pattern and pattern in actual)
 
 def user_correlation(db: Session, site_key: str, reference_at: datetime | None = None):
     rules=db.scalars(select(CorrelationRule).where(CorrelationRule.enabled.is_(True)).order_by(CorrelationRule.id)).all()
