@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import Problem, ScoringRule
+from app.models import Host, Problem, ScoringRule
 
 
 SEVERITY_POINTS = {0: 2, 1: 5, 2: 12, 3: 22, 4: 35, 5: 50}
@@ -34,6 +34,33 @@ def load_tag_rules(db: Session) -> dict[tuple[str, str], int]:
     return {(str(r.key).lower(), str(r.value).lower()): r.points for r in rules if r.key and r.value}
 
 
+def host_tags_for_problem(db: Session, hosts: list[dict] | None) -> list[dict]:
+    """Return unique tags of all Zabbix hosts attached to a problem."""
+    host_ids = []
+    for host in hosts or []:
+        raw_id = host.get("hostid")
+        if raw_id is not None:
+            try:
+                host_ids.append(int(raw_id))
+            except (TypeError, ValueError):
+                pass
+
+    if not host_ids:
+        return []
+
+    rows = db.scalars(select(Host).where(Host.zabbix_hostid.in_(set(host_ids)))).all()
+    result = []
+    seen = set()
+    for host in rows:
+        for tag in host.tags or []:
+            pair = (str(tag.get("tag", "")).lower(), str(tag.get("value", "")).lower())
+            if not pair[0] or pair in seen:
+                continue
+            seen.add(pair)
+            result.append({"tag": tag.get("tag", ""), "value": tag.get("value", "")})
+    return result
+
+
 def calculate_impact(problem: dict, tag_rules: dict | None = None) -> tuple[int, dict]:
     rules = tag_rules if tag_rules is not None else DEFAULT_TAG_RULES
     severity = int(problem.get("severity", 0))
@@ -42,15 +69,20 @@ def calculate_impact(problem: dict, tag_rules: dict | None = None) -> tuple[int,
     score = severity_points
 
     seen = set()
-    for tag in problem.get("tags", []) or []:
-        pair = (str(tag.get("tag", "")).lower(), str(tag.get("value", "")).lower())
-        if pair in seen:
-            continue
-        seen.add(pair)
-        points = rules.get(pair)
-        if points:
-            score += points
-            breakdown["tags"].append({"tag": pair[0], "value": pair[1], "points": points})
+    tag_sources = (
+        ("problem", problem.get("tags", []) or []),
+        ("host", problem.get("host_tags", []) or []),
+    )
+    for source, tags in tag_sources:
+        for tag in tags:
+            pair = (str(tag.get("tag", "")).lower(), str(tag.get("value", "")).lower())
+            if pair in seen:
+                continue
+            seen.add(pair)
+            points = rules.get(pair)
+            if points:
+                score += points
+                breakdown["tags"].append({"tag": pair[0], "value": pair[1], "points": points, "source": source})
 
     try:
         clock = problem.get("clock")
@@ -87,6 +119,7 @@ def recalculate_all(db: Session) -> int:
         score, breakdown = calculate_impact({
             "severity": item.severity,
             "tags": item.tags,
+            "host_tags": host_tags_for_problem(db, item.hosts),
             "started_at": item.started_at,
             "acknowledged": item.acknowledged,
         }, rules)
