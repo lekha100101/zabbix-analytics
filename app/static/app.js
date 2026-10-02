@@ -1,149 +1,32 @@
 const $=s=>document.querySelector(s);const $$=s=>document.querySelectorAll(s);
 function toast(t){const e=$('#toast');e.textContent=t;e.style.display='block';setTimeout(()=>e.style.display='none',2500)}
 async function api(url,opt={}){const r=await fetch(url,opt);if(!r.ok){let x;try{x=await r.json()}catch{x={detail:r.statusText}}throw new Error(x.detail||r.statusText)}return r.json()}
-$$('.nav').forEach(b=>b.onclick=()=>{$$('.nav,.tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');$('#'+b.dataset.tab).classList.add('active');if(b.dataset.tab==='attention')loadAttention();if(b.dataset.tab==='deferred')loadDeferred();if(b.dataset.tab==='sites')loadSites();if(b.dataset.tab==='instability')loadInstability();if(b.dataset.tab==='criticality'){loadHosts();loadGroups()}if(b.dataset.tab==='correlation'){initCorrelationSearch();loadCorrelationEvents();loadCorrelationRules()}if(b.dataset.tab==='scoring')loadRules()});
+$$('.nav').forEach(b=>b.onclick=()=>{$$('.nav,.tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');$('#'+b.dataset.tab).classList.add('active');if(b.dataset.tab==='overview')loadDashboard();if(b.dataset.tab==='problems')loadProblems();if(b.dataset.tab==='deferred')loadDeferred();if(b.dataset.tab==='sites')loadSites();if(b.dataset.tab==='instability')loadInstability();if(b.dataset.tab==='correlation'){initCorrelationSearch();loadCorrelationEvents();loadCorrelationRules()}if(b.dataset.tab==='scoring')loadRules()});
 const sev={0:'Not classified',1:'Information',2:'Warning',3:'Average',4:'High',5:'Disaster'};
 function age(d){let s=(Date.now()-new Date(d))/1000;if(s<3600)return Math.floor(s/60)+' мин';if(s<86400)return Math.floor(s/3600)+' ч';return Math.floor(s/86400)+' д'}
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function statusBadge(ok,good='Доступен',bad='Недоступен'){return `<span class="status ${ok?'ok':'bad'}"><i></i>${ok?good:bad}</span>`}
+async function loadDashboard(){try{const d=await api('/api/v1/dashboard');$('#overviewCards').innerHTML=`<div class="metric"><span>Объекты</span><strong>${d.objects.total}</strong><small>${d.objects.healthy} без активных проблем</small></div><div class="metric"><span>Доступность хостов</span><strong>${d.hosts.availability_percent}%</strong><small>${d.hosts.available} из ${d.hosts.total} доступны</small></div><div class="metric"><span>Недоступные хосты</span><strong>${d.hosts.unavailable}</strong><small>${d.hosts.affected} затронуто проблемами</small></div><div class="metric"><span>Интернет-каналы</span><strong>${d.internet.available}/${d.internet.total}</strong><small>${d.internet.unavailable} недоступно</small></div><div class="metric"><span>Критичные объекты</span><strong>${d.objects.critical}</strong><small>Risk ≥ 70</small></div>`;$('#overviewObjects').innerHTML=(d.important_objects||[]).map(x=>`<tr><td><b>${esc(x.site_key)}</b><small class="table-sub">${esc(x.zabbix_group_name||'')}</small></td><td><span class="risk risk-${x.risk_score>=70?'high':x.risk_score>=40?'mid':'low'}">${x.risk_score}</span></td><td>${x.affected_hosts}/${x.hosts_total}</td><td>${x.unavailable_hosts}</td><td>${esc(x.probable_cause||'Активные проблемы')}</td></tr>`).join('')||'<tr><td colspan="5" class="empty">Проблемных объектов нет</td></tr>';$('#internetList').innerHTML=(d.internet_channels||[]).map(x=>`<div class="status-row"><div><b>${esc(x.site_key)}</b><small>${x.gateways} gateway</small></div>${statusBadge(x.available)}</div>`).join('')||'<div class="empty">В SITE-объектах пока не обнаружены gateway-хосты</div>'}catch(e){toast(e.message)}}
 async function loadProblems(){try{const d=await api('/api/v1/problems?limit=100');let high=0,disaster=0,unack=0;d.items.forEach(x=>{if(x.severity===4)high++;if(x.severity===5)disaster++;if(!x.acknowledged)unack++});$('#cards').innerHTML=`<div class="card"><span class="muted">Показано проблем</span><div class="number">${d.count}</div></div><div class="card"><span class="muted">Disaster</span><div class="number">${disaster}</div></div><div class="card"><span class="muted">High</span><div class="number">${high}</div></div><div class="card"><span class="muted">Не подтверждено</span><div class="number">${unack}</div></div>`;$('#problemsBody').innerHTML=d.items.map((x,i)=>{const h=(x.hosts||[]).map(h=>h.name||h.host).join(', ');const b=x.score_breakdown||{};const tags=(b.tags||[]).map(t=>`<span>${esc(t.tag)}=${esc(t.value)} +${t.points}</span>`).join('');return `<tr class="problem-row" onclick="document.getElementById('d${i}').hidden=!document.getElementById('d${i}').hidden"><td class="score">${x.impact_score}</td><td class="severity">${sev[x.severity]||x.severity}</td><td>${esc(h)}</td><td>${esc(x.name)}</td><td>${age(x.started_at)}</td><td>${x.acknowledged?'Да':'Нет'}</td><td><button onclick="event.stopPropagation();deferProblem('${x.eventid}')">Отложить</button></td></tr><tr class="details" id="d${i}" hidden><td colspan="7"><div class="breakdown"><span>Severity +${b.severity||0}</span>${tags}<span>Возраст +${b.duration||0}</span><span>Host +${b.host_criticality||0}</span><span>Group +${b.group_criticality||0}</span><span>Ack +${b.unacknowledged||0}</span><span><b>Total ${b.total??x.impact_score}</b></span></div></td></tr>`}).join('')}catch(e){toast(e.message)}}
-
 async function deferProblem(id){const hours=prompt('На сколько часов отложить проблему?','24');if(hours===null)return;const n=Number(hours);if(!Number.isFinite(n)||n<=0){toast('Укажите количество часов больше 0');return}const reason=prompt('Причина / комментарий (необязательно)','')||'';const until=new Date(Date.now()+n*3600000).toISOString();try{await api('/api/v1/problems/'+id+'/defer',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({until,reason})});toast('Проблема отложена');loadProblems()}catch(e){toast(e.message)}}
 async function undeferProblem(id){try{await api('/api/v1/problems/'+id+'/defer',{method:'DELETE'});toast('Проблема возвращена');loadDeferred()}catch(e){toast(e.message)}}
 async function loadDeferred(){try{const d=await api('/api/v1/deferred-problems');$('#deferredCards').innerHTML='<div class="card"><span class="muted">Отложено</span><div class="number">'+d.count+'</div></div>';$('#deferredBody').innerHTML=d.items.map(x=>{const h=(x.hosts||[]).map(h=>h.name||h.host).join(', ');return '<tr><td class="score">'+x.impact_score+'</td><td class="severity">'+(sev[x.severity]||x.severity)+'</td><td>'+esc(h)+'</td><td>'+esc(x.name)+'</td><td>'+new Date(x.deferred_until).toLocaleString('ru-RU')+'</td><td>'+esc(x.deferred_reason||'—')+'</td><td><button onclick="undeferProblem(\''+x.eventid+'\')">Вернуть</button></td></tr>'}).join('')||'<tr><td colspan="7">Отложенных проблем нет</td></tr>'}catch(e){toast(e.message)}}
-async function loadAttention(){try{const d=await api('/api/v1/attention');const critical=d.items.filter(x=>x.risk_score>=90).length;const mass=d.items.filter(x=>x.unavailable_ratio>=50).length;$('#attentionCards').innerHTML=`<div class="card"><span class="muted">Ситуаций</span><div class="number">${d.count}</div></div><div class="card"><span class="muted">Risk ≥ 90</span><div class="number">${critical}</div></div><div class="card"><span class="muted">Недоступно ≥ 50%</span><div class="number">${mass}</div></div>`;$('#attentionBody').innerHTML=d.items.map(x=>`<tr><td class="score">${x.risk_score}</td><td><b>${esc(x.site_key)}</b></td><td>${esc(x.probable_cause||'Высокий совокупный риск')}</td><td>${x.unavailable_hosts}/${x.hosts_total} (${x.unavailable_ratio}%)</td><td>${x.burst_15m}</td></tr>`).join('')||'<tr><td colspan="5">Критичных коррелированных ситуаций нет</td></tr>'}catch(e){toast(e.message)}}
-async function loadSites(){try{const d=await api('/api/v1/sites');$('#sitesBody').innerHTML=d.items.map((x,i)=>{const problems=(x.top_problems||[]).map(p=>{const hs=(p.hosts||[]).map(h=>`${esc(h.equipment)}: ${esc(h.name)}`).join(', ');return `<div style="margin:6px 0"><b>${p.impact_score}</b> · ${esc(p.name)} <small class="muted">[${esc(p.category||'other')}]</small><br><small class="muted">${hs}</small></div>`}).join('');const equipment=Object.entries(x.equipment||{}).map(([k,v])=>`${esc(k)} × ${v}`).join(' · ');const roles=Object.entries(x.roles||{}).map(([k,v])=>`${esc(k)} × ${v}`).join(' · ');const rb=x.risk_breakdown||{};const categories=Object.entries(x.categories||{}).map(([k,v])=>`${esc(k)} × ${v}`).join(' · ');return `<tr class="problem-row" onclick="document.getElementById('s${i}').hidden=!document.getElementById('s${i}').hidden"><td class="score">${x.risk_score}</td><td><b>${esc(x.site_key)}</b></td><td>${esc(x.region)}</td><td>${x.active_problems}</td><td>${x.affected_hosts}</td><td>${x.unavailable_hosts}</td><td>${x.hosts_total}</td><td>${x.unavailable_ratio}%</td><td>${x.burst_15m}</td></tr><tr class="details" id="s${i}" hidden><td colspan="9"><div><b>Вероятная причина:</b> ${esc(x.probable_cause||'не определена')}</div><div style="margin-top:8px"><b>Категории:</b> ${categories||'—'}</div><div><b>Роли:</b> ${roles||'—'}</div><div><b>Оборудование:</b> ${equipment||'—'}</div><div style="margin-top:10px"><b>TOP проблем:</b>${problems}</div><div class="breakdown" style="margin-top:10px"><span>Impact +${rb.max_problem||0}</span><span>Устройства +${rb.multi_device||0}</span><span>Недоступность +${rb.unavailable_ratio||0}</span><span>Burst +${rb.burst||0}</span><span>GW +${rb.gateway||0}</span><span>Крит. сервис +${rb.critical_service||0}</span><span><b>Risk ${x.risk_score}</b></span></div></td></tr>`}).join('')||'<tr><td colspan="9">Нет объектов с активными проблемами</td></tr>'}catch(e){toast(e.message)}}
+async function loadSites(){try{const d=await api('/api/v1/sites');$('#sitesBody').innerHTML=d.items.map((x,i)=>{const problems=(x.top_problems||[]).map(p=>{const hs=(p.hosts||[]).map(h=>`${esc(h.equipment)}: ${esc(h.name)}`).join(', ');return `<div class="problem-mini"><b>${p.impact_score}</b> · ${esc(p.name)} <small>[${esc(p.category||'other')}]</small><br><small>${hs}</small></div>`}).join('');return `<tr class="problem-row" onclick="document.getElementById('s${i}').hidden=!document.getElementById('s${i}').hidden"><td><span class="risk risk-${x.risk_score>=70?'high':x.risk_score>=40?'mid':'low'}">${x.risk_score}</span></td><td><b>${esc(x.site_key)}</b></td><td>${esc(x.zabbix_group_name||'')}</td><td>${x.active_problems}</td><td>${x.affected_hosts}</td><td>${x.unavailable_hosts}</td><td>${x.hosts_total}</td><td>${x.unavailable_ratio}%</td></tr><tr class="details" id="s${i}" hidden><td colspan="8"><b>Вероятная причина:</b> ${esc(x.probable_cause||'не определена')}<div class="detail-grid"><span>Регион: <b>${esc(x.region)}</b></span><span>Gateway: <b>${x.gateway_affected?'проблема':'OK'}</b></span><span>Проблем 15 мин: <b>${x.burst_15m}</b></span></div><div class="top-problems"><b>TOP проблем</b>${problems||'<div class="empty">Активных проблем нет</div>'}</div></td></tr>`}).join('')||'<tr><td colspan="8" class="empty">SITE-объекты не найдены</td></tr>'}catch(e){toast(e.message)}}
 async function loadInstability(){try{const d=await api('/api/v1/instability');const critical=d.items.filter(x=>x.instability_score>=80).length;const repeated24=d.items.filter(x=>x.events_24h>=3).length;$('#instabilityCards').innerHTML=`<div class="card"><span class="muted">Повторяющихся</span><div class="number">${d.count}</div></div><div class="card"><span class="muted">Score ≥ 80</span><div class="number">${critical}</div></div><div class="card"><span class="muted">≥3 за 24ч</span><div class="number">${repeated24}</div></div>`;$('#instabilityBody').innerHTML=d.items.map(x=>`<tr><td class="score">${x.instability_score}</td><td><b>${esc(x.host)}</b></td><td>${esc(x.problem)}</td><td>${x.events_24h}</td><td>${x.events_7d}</td><td>${x.recovered_7d}</td><td>${new Date(x.last_event_at).toLocaleString('ru-RU')}</td></tr>`).join('')||'<tr><td colspan="7">Повторяющихся проблем за 7 дней нет</td></tr>'}catch(e){toast(e.message)}}
-async function syncNow(){try{toast('Синхронизация...');await api('/api/v1/sync',{method:'POST'});toast('Синхронизация завершена');loadProblems()}catch(e){toast(e.message)}}
-async function recalculate(){try{const d=await api('/api/v1/scoring/recalculate',{method:'POST'});toast(`Пересчитано: ${d.recalculated}`);loadProblems()}catch(e){toast(e.message)}}
-async function loadHosts(){try{const q=encodeURIComponent($('#hostSearch').value||'');const d=await api(`/api/v1/hosts?q=${q}&limit=100`);$('#hostsList').innerHTML=d.map(x=>`<div class="item"><div><b>${esc(x.name)}</b><br><small class="muted">${esc(x.host)}</small></div><input id="h${x.hostid}" type="number" min="-50" max="50" value="${x.criticality}"><button onclick="saveHost('${x.hostid}')">OK</button></div>`).join('')}catch(e){toast(e.message)}}
-async function saveHost(id){try{await api(`/api/v1/hosts/${id}/criticality`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({points:+$('#h'+id).value})});toast('Критичность хоста сохранена')}catch(e){toast(e.message)}}
-async function loadGroups(){try{const d=await api('/api/v1/host-groups');$('#groupsList').innerHTML=d.map(x=>`<div class="item"><div><b>${esc(x.name)}</b></div><input id="g${x.groupid}" type="number" min="-50" max="50" value="${x.criticality}"><button onclick="saveGroup('${x.groupid}')">OK</button></div>`).join('')}catch(e){toast(e.message)}}
-async function saveGroup(id){try{await api(`/api/v1/host-groups/${id}/criticality`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({points:+$('#g'+id).value})});toast('Критичность группы сохранена')}catch(e){toast(e.message)}}
+async function syncNow(){try{toast('Синхронизация...');await api('/api/v1/sync',{method:'POST'});toast('Синхронизация завершена');loadDashboard()}catch(e){toast(e.message)}}
+async function recalculate(){try{const d=await api('/api/v1/scoring/recalculate',{method:'POST'});toast(`Пересчитано: ${d.recalculated}`);loadRules()}catch(e){toast(e.message)}}
 async function loadRules(){try{const d=await api('/api/v1/scoring/rules');$('#rulesList').innerHTML=d.map(x=>`<div class="rule"><div><b>${esc(x.key)}=${esc(x.value)}</b><br><small class="muted">${esc(x.name)}</small></div><input id="r${x.id}" type="number" value="${x.points}"><label><input id="e${x.id}" type="checkbox" ${x.enabled?'checked':''}> включено</label><button onclick="saveRule(${x.id})">Сохранить</button></div>`).join('')}catch(e){toast(e.message)}}
 async function saveRule(id){try{await api(`/api/v1/scoring/rules/${id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({points:+$('#r'+id).value,enabled:$('#e'+id).checked})});toast('Правило сохранено')}catch(e){toast(e.message)}}
-loadProblems();
-
-let corrSteps = [];
-let corrEditing = null;
-let corrSearchTimer = null;
-
-function renderCorrelationChain() {
-  const el = $('#corrChain');
-  if (!el) return;
-  if (!corrSteps.length) {
-    el.innerHTML = '<div class="corr-empty">Добавьте минимум два события из библиотеки слева</div>';
-    return;
-  }
-  el.innerHTML = corrSteps.map((x, i) =>
-    '<div class="corr-step"><div class="corr-num">' + (i + 1) + '</div>' +
-    '<div class="corr-step-text"><b>' + esc(x.pattern || x.name) + '</b><small>Любой хост · все объекты</small></div>' +
-    '<div class="corr-step-actions"><button type="button" onclick="moveCorr(' + i + ',-1)">←</button>' +
-    '<button type="button" onclick="moveCorr(' + i + ',1)">→</button>' +
-    '<button type="button" onclick="removeCorr(' + i + ')">×</button></div></div>'
-  ).join('<div class="corr-arrow">→</div>');
-}
-
-async function loadCorrelationEvents() {
-  const box = $('#corrEvents');
-  if (!box) return;
-  try {
-    const input = $('#corrSearch');
-    const q = encodeURIComponent(input ? input.value.trim() : '');
-    box.innerHTML = '<div class="muted">Поиск...</div>';
-    const d = await api('/api/v1/correlation/event-types?q=' + q + '&limit=60');
-    window._corrEvents = d.items || [];
-    box.innerHTML = window._corrEvents.map((x, i) =>
-      '<div class="corr-event"><div><b>' + esc(x.name) + '</b><small>' +
-      x.count + ' событий · ' + esc((x.hosts || []).slice(0, 2).join(', ')) +
-      '</small></div><button type="button" data-ci="' + i + '">+</button></div>'
-    ).join('') || '<div class="muted">Ничего не найдено. Ищите по событию, хосту или тегу.</div>';
-    $$('#corrEvents [data-ci]').forEach(b => {
-      b.addEventListener('click', () => addCorr(Number(b.dataset.ci)));
-    });
-  } catch (e) {
-    box.innerHTML = '<div class="muted">Ошибка поиска: ' + esc(e.message) + '</div>';
-    toast(e.message);
-  }
-}
-
-function suggestCorrelationPattern(name) {
-  let value = String(name || '').trim();
-  const known = [
-    'Unavailable by ICMP', 'unavailable by ICMP', 'is unreachable by ICMP',
-    'input source Failure', 'Input voltage too high', 'Input voltage too low',
-    'on Battery', 'battery low', 'Backup failed', 'No backup'
-  ];
-  const lower = value.toLowerCase();
-  for (const p of known) {
-    const pos = lower.indexOf(p.toLowerCase());
-    if (pos >= 0) return value.slice(pos);
-  }
-  return value;
-}
-function addCorr(i) {
-  const x = (window._corrEvents || [])[i];
-  if (!x) return;
-  const suggested = suggestCorrelationPattern(x.name);
-  const pattern = prompt('Шаблон события. Он будет применяться ко всем хостам и объектам:', suggested);
-  if (pattern === null || !pattern.trim()) return;
-  corrSteps.push({pattern: pattern.trim(), name: pattern.trim(), match: 'contains'});
-  renderCorrelationChain();
-}
-function removeCorr(i) { corrSteps.splice(i, 1); renderCorrelationChain(); }
-function moveCorr(i, d) {
-  const j = i + d;
-  if (j < 0 || j >= corrSteps.length) return;
-  const tmp = corrSteps[i]; corrSteps[i] = corrSteps[j]; corrSteps[j] = tmp;
-  renderCorrelationChain();
-}
-function newCorrelation() {
-  corrEditing = null; corrSteps = [];
-  if ($('#corrName')) $('#corrName').value = '';
-  if ($('#corrDescription')) $('#corrDescription').value = '';
-  if ($('#corrWindow')) $('#corrWindow').value = 120;
-  renderCorrelationChain();
-}
-async function saveCorrelation() {
-  const name = $('#corrName').value.trim();
-  if (!name || corrSteps.length < 2) { toast('Укажите название и добавьте минимум два события'); return; }
-  const body = {name, description: $('#corrDescription').value.trim(), window_minutes: Number($('#corrWindow').value) || 120, steps: corrSteps, enabled: true};
-  try {
-    await api(corrEditing ? '/api/v1/correlation/rules/' + corrEditing : '/api/v1/correlation/rules', {
-      method: corrEditing ? 'PUT' : 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
-    });
-    toast('Правило сохранено'); newCorrelation(); await loadCorrelationRules();
-  } catch (e) { toast(e.message); }
-}
-async function loadCorrelationRules() {
-  try {
-    const d = await api('/api/v1/correlation/rules');
-    window._corrRules = d.items || [];
-    $('#corrRules').innerHTML = window._corrRules.map((x, i) =>
-      '<div class="corr-rule"><div><b>' + esc(x.name) + '</b><small>' + x.steps.length + ' шага · ' + x.window_minutes +
-      ' мин</small></div><div><button type="button" onclick="editCorrelation(' + i + ')">Изменить</button>' +
-      '<button type="button" onclick="deleteCorrelation(' + x.id + ')">×</button></div></div>'
-    ).join('') || '<div class="muted">Правил пока нет</div>';
-  } catch (e) { toast(e.message); }
-}
-function editCorrelation(i) {
-  const x = (window._corrRules || [])[i]; if (!x) return;
-  corrEditing = x.id; corrSteps = JSON.parse(JSON.stringify(x.steps || []));
-  $('#corrName').value = x.name; $('#corrDescription').value = x.description || ''; $('#corrWindow').value = x.window_minutes;
-  renderCorrelationChain();
-}
-async function deleteCorrelation(id) {
-  if (!confirm('Удалить правило корреляции?')) return;
-  try { await api('/api/v1/correlation/rules/' + id, {method: 'DELETE'}); toast('Правило удалено'); await loadCorrelationRules(); }
-  catch (e) { toast(e.message); }
-}
-function initCorrelationSearch() {
-  const input = $('#corrSearch');
-  if (!input || input.dataset.ready) return;
-  input.dataset.ready = '1';
-  input.addEventListener('keydown', e => {
-    if (e.key === 'Enter') { e.preventDefault(); clearTimeout(corrSearchTimer); loadCorrelationEvents(); }
-  });
-  input.addEventListener('input', () => {
-    clearTimeout(corrSearchTimer); corrSearchTimer = setTimeout(loadCorrelationEvents, 350);
-  });
-}
+let corrSteps=[];let corrEditing=null;let corrSearchTimer=null;
+function renderCorrelationChain(){const el=$('#corrChain');if(!el)return;if(!corrSteps.length){el.innerHTML='<div class="corr-empty">Добавьте минимум два события из библиотеки слева</div>';return}el.innerHTML=corrSteps.map((x,i)=>'<div class="corr-step"><div class="corr-num">'+(i+1)+'</div><div class="corr-step-text"><b>'+esc(x.pattern||x.name)+'</b><small>Любой хост · все SITE-объекты</small></div><div class="corr-step-actions"><button type="button" onclick="moveCorr('+i+',-1)">←</button><button type="button" onclick="moveCorr('+i+',1)">→</button><button type="button" onclick="removeCorr('+i+')">×</button></div></div>').join('<div class="corr-arrow">→</div>')}
+async function loadCorrelationEvents(){const box=$('#corrEvents');if(!box)return;try{const input=$('#corrSearch');const q=encodeURIComponent(input?input.value.trim():'');box.innerHTML='<div class="muted">Поиск...</div>';const d=await api('/api/v1/correlation/event-types?q='+q+'&limit=60');window._corrEvents=d.items||[];box.innerHTML=window._corrEvents.map((x,i)=>'<div class="corr-event"><div><b>'+esc(x.name)+'</b><small>'+x.count+' событий · '+esc((x.hosts||[]).slice(0,2).join(', '))+'</small></div><button type="button" data-ci="'+i+'">+</button></div>').join('')||'<div class="muted">Ничего не найдено</div>';$$('#corrEvents [data-ci]').forEach(b=>b.addEventListener('click',()=>addCorr(Number(b.dataset.ci))))}catch(e){box.innerHTML='<div class="muted">Ошибка поиска: '+esc(e.message)+'</div>';toast(e.message)}}
+function suggestCorrelationPattern(name){let value=String(name||'').trim();const known=['Unavailable by ICMP','unavailable by ICMP','is unreachable by ICMP','input source Failure','Input voltage too high','Input voltage too low','on Battery','battery low','Backup failed','No backup'];const lower=value.toLowerCase();for(const p of known){const pos=lower.indexOf(p.toLowerCase());if(pos>=0)return value.slice(pos)}return value}
+function addCorr(i){const x=(window._corrEvents||[])[i];if(!x)return;const pattern=prompt('Шаблон события. Он будет применяться ко всем SITE-объектам:',suggestCorrelationPattern(x.name));if(pattern===null||!pattern.trim())return;corrSteps.push({pattern:pattern.trim(),name:pattern.trim(),match:'contains'});renderCorrelationChain()}
+function removeCorr(i){corrSteps.splice(i,1);renderCorrelationChain()}function moveCorr(i,d){const j=i+d;if(j<0||j>=corrSteps.length)return;const tmp=corrSteps[i];corrSteps[i]=corrSteps[j];corrSteps[j]=tmp;renderCorrelationChain()}
+function newCorrelation(){corrEditing=null;corrSteps=[];if($('#corrName'))$('#corrName').value='';if($('#corrDescription'))$('#corrDescription').value='';if($('#corrWindow'))$('#corrWindow').value=120;renderCorrelationChain()}
+async function saveCorrelation(){const name=$('#corrName').value.trim();if(!name||corrSteps.length<2){toast('Укажите название и добавьте минимум два события');return}const body={name,description:$('#corrDescription').value.trim(),window_minutes:Number($('#corrWindow').value)||120,steps:corrSteps,enabled:true};try{await api(corrEditing?'/api/v1/correlation/rules/'+corrEditing:'/api/v1/correlation/rules',{method:corrEditing?'PUT':'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});toast('Правило сохранено');newCorrelation();await loadCorrelationRules()}catch(e){toast(e.message)}}
+async function loadCorrelationRules(){try{const d=await api('/api/v1/correlation/rules');window._corrRules=d.items||[];$('#corrRules').innerHTML=window._corrRules.map((x,i)=>'<div class="corr-rule"><div><b>'+esc(x.name)+'</b><small>'+x.steps.length+' шага · '+x.window_minutes+' мин</small></div><div><button type="button" onclick="editCorrelation('+i+')">Изменить</button><button type="button" onclick="deleteCorrelation('+x.id+')">×</button></div></div>').join('')||'<div class="muted">Правил пока нет</div>'}catch(e){toast(e.message)}}
+function editCorrelation(i){const x=(window._corrRules||[])[i];if(!x)return;corrEditing=x.id;corrSteps=JSON.parse(JSON.stringify(x.steps||[]));$('#corrName').value=x.name;$('#corrDescription').value=x.description||'';$('#corrWindow').value=x.window_minutes;renderCorrelationChain()}
+async function deleteCorrelation(id){if(!confirm('Удалить правило корреляции?'))return;try{await api('/api/v1/correlation/rules/'+id,{method:'DELETE'});toast('Правило удалено');await loadCorrelationRules()}catch(e){toast(e.message)}}
+function initCorrelationSearch(){const input=$('#corrSearch');if(!input||input.dataset.ready)return;input.dataset.ready='1';input.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();clearTimeout(corrSearchTimer);loadCorrelationEvents()}});input.addEventListener('input',()=>{clearTimeout(corrSearchTimer);corrSearchTimer=setTimeout(loadCorrelationEvents,350)})}
+loadDashboard();
