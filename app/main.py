@@ -6,6 +6,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -18,136 +19,124 @@ from app.services.sync import sync_all
 from app.services.zabbix import ZabbixClient
 
 settings = get_settings()
-app = FastAPI(title=settings.app_name, version="0.11.0")
+app = FastAPI(title=settings.app_name, version="0.12.0")
 BASE_DIR = Path(__file__).resolve().parent
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
 
 @app.on_event("startup")
 def startup() -> None: Base.metadata.create_all(bind=engine)
-
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request): return templates.TemplateResponse(request=request, name="index.html")
-
 @app.get("/health")
 def health(db: Session = Depends(get_db)) -> dict:
     try: db.execute(text("SELECT 1")); database="ok"
     except Exception as exc: database=f"error: {exc}"
-    return {"status":"ok" if database=="ok" else "degraded","service":settings.app_name,"version":"0.11.0","database":database}
-
+    return {"status":"ok" if database=="ok" else "degraded","service":settings.app_name,"version":"0.12.0","database":database}
 @app.get("/api/v1/zabbix/status")
 async def zabbix_status() -> dict:
     try: return {"status":"ok","zabbix_version":await ZabbixClient().version()}
     except Exception as exc: raise HTTPException(status_code=502,detail=str(exc)) from exc
-
 @app.post("/api/v1/sync")
 async def run_sync(db: Session = Depends(get_db)) -> dict:
-    try:
-        result=await sync_all(db); recalculate_all(db); return result
+    try: result=await sync_all(db); recalculate_all(db); return result
     except Exception as exc: raise HTTPException(status_code=502,detail=str(exc)) from exc
-
 @app.get("/api/v1/dashboard")
 def dashboard_overview(db: Session = Depends(get_db)) -> dict:
-    sites=site_analytics(db)
-    total_hosts=sum(x["hosts_total"] for x in sites)
-    unavailable_hosts=sum(x["unavailable_hosts"] for x in sites)
-    affected_hosts=sum(x["affected_hosts"] for x in sites)
-    healthy_hosts=max(0,total_hosts-unavailable_hosts)
-    healthy_sites=sum(1 for x in sites if x["active_problems"]==0)
-    unavailable_sites=sum(1 for x in sites if x["unavailable_hosts"]>0)
-    critical_sites=sum(1 for x in sites if x["risk_score"]>=70)
-    wan_sites=[]
+    sites=site_analytics(db); total_hosts=sum(x["hosts_total"] for x in sites); unavailable_hosts=sum(x["unavailable_hosts"] for x in sites); affected_hosts=sum(x["affected_hosts"] for x in sites); healthy_hosts=max(0,total_hosts-unavailable_hosts); healthy_sites=sum(1 for x in sites if x["active_problems"]==0); unavailable_sites=sum(1 for x in sites if x["unavailable_hosts"]>0); critical_sites=sum(1 for x in sites if x["risk_score"]>=70); wan_sites=[]
     for x in sites:
         gateways=int((x.get("roles") or {}).get("gateway",0))
-        if gateways:
-            wan_sites.append({"site_key":x["site_key"],"gateways":gateways,"available":not x["gateway_affected"],"risk_score":x["risk_score"],"cause":x["probable_cause"]})
-    wan_down=sum(1 for x in wan_sites if not x["available"])
-    important=sorted([x for x in sites if x["active_problems"] or x["risk_score"]],key=lambda x:(-x["risk_score"],-x["unavailable_ratio"],x["site_key"]))[:12]
+        if gateways: wan_sites.append({"site_key":x["site_key"],"gateways":gateways,"available":not x["gateway_affected"],"risk_score":x["risk_score"],"cause":x["probable_cause"]})
+    wan_down=sum(1 for x in wan_sites if not x["available"]); important=sorted([x for x in sites if x["active_problems"] or x["risk_score"]],key=lambda x:(-x["risk_score"],-x["unavailable_ratio"],x["site_key"]))[:12]
     return {"objects":{"total":len(sites),"healthy":healthy_sites,"with_unavailable_hosts":unavailable_sites,"critical":critical_sites},"hosts":{"total":total_hosts,"available":healthy_hosts,"unavailable":unavailable_hosts,"affected":affected_hosts,"availability_percent":round(healthy_hosts/total_hosts*100,2) if total_hosts else 100.0},"internet":{"total":len(wan_sites),"available":len(wan_sites)-wan_down,"unavailable":wan_down},"important_objects":important,"internet_channels":sorted(wan_sites,key=lambda x:(x["available"],-x["risk_score"],x["site_key"]))}
 
 @app.post("/api/v1/scoring/recalculate")
 def recalculate(db: Session = Depends(get_db)) -> dict: return {"status":"ok","recalculated":recalculate_all(db)}
-
+def scoring_rule_dict(r:ScoringRule)->dict: return {"id":r.id,"name":r.name,"rule_type":r.rule_type,"key":r.key,"value":r.value,"points":r.points,"enabled":r.enabled,"priority":r.priority}
+def scoring_payload(payload:dict)->dict:
+    name=str(payload.get("name") or "").strip(); rule_type=str(payload.get("rule_type") or "tag").strip().lower(); key=str(payload.get("key") or "").strip() or None; value=str(payload.get("value") or "").strip() or None
+    if not name: raise HTTPException(status_code=400,detail="Укажите название правила")
+    if rule_type not in {"tag","severity","duration","unacknowledged"}: raise HTTPException(status_code=400,detail="Неизвестный тип правила")
+    if rule_type=="tag" and (not key or not value): raise HTTPException(status_code=400,detail="Для tag-правила нужны key и value")
+    return {"name":name,"rule_type":rule_type,"key":key,"value":value,"points":max(-100,min(100,int(payload.get("points",0)))),"enabled":bool(payload.get("enabled",True)),"priority":max(1,min(10000,int(payload.get("priority",100))))}
 @app.get("/api/v1/scoring/rules")
 def scoring_rules(db: Session = Depends(get_db)) -> list[dict]:
-    ensure_default_rules(db); rules=db.scalars(select(ScoringRule).order_by(ScoringRule.priority,ScoringRule.id)).all()
-    return [{"id":r.id,"name":r.name,"rule_type":r.rule_type,"key":r.key,"value":r.value,"points":r.points,"enabled":r.enabled,"priority":r.priority} for r in rules]
-
+    ensure_default_rules(db); return [scoring_rule_dict(r) for r in db.scalars(select(ScoringRule).order_by(ScoringRule.priority,ScoringRule.id)).all()]
+@app.post("/api/v1/scoring/rules")
+def create_rule(payload:dict=Body(...),db:Session=Depends(get_db))->dict:
+    data=scoring_payload(payload); rule=ScoringRule(**data); db.add(rule)
+    try: db.commit(); db.refresh(rule)
+    except IntegrityError: db.rollback(); raise HTTPException(status_code=409,detail="Правило с таким названием уже существует")
+    recalculate_all(db); return {"status":"ok","rule":scoring_rule_dict(rule)}
+@app.put("/api/v1/scoring/rules/{rule_id}")
+def replace_rule(rule_id:int,payload:dict=Body(...),db:Session=Depends(get_db))->dict:
+    rule=db.get(ScoringRule,rule_id)
+    if not rule: raise HTTPException(status_code=404,detail="Правило Score не найдено")
+    for k,v in scoring_payload(payload).items(): setattr(rule,k,v)
+    try: db.commit()
+    except IntegrityError: db.rollback(); raise HTTPException(status_code=409,detail="Правило с таким названием уже существует")
+    recalculate_all(db); return {"status":"ok","rule":scoring_rule_dict(rule)}
 @app.patch("/api/v1/scoring/rules/{rule_id}")
 def update_rule(rule_id:int,payload:dict=Body(...),db:Session=Depends(get_db))->dict:
     rule=db.get(ScoringRule,rule_id)
-    if not rule: raise HTTPException(status_code=404,detail="Scoring rule not found")
+    if not rule: raise HTTPException(status_code=404,detail="Правило Score не найдено")
     for field in ("points","enabled","priority"):
         if field in payload: setattr(rule,field,payload[field])
-    db.commit(); return {"status":"ok","id":rule.id}
+    db.commit(); recalculate_all(db); return {"status":"ok","id":rule.id}
+@app.delete("/api/v1/scoring/rules/{rule_id}")
+def delete_rule(rule_id:int,db:Session=Depends(get_db))->dict:
+    rule=db.get(ScoringRule,rule_id)
+    if not rule: raise HTTPException(status_code=404,detail="Правило Score не найдено")
+    db.delete(rule); db.commit(); recalculate_all(db); return {"status":"ok"}
 
 @app.get("/api/v1/hosts")
 def hosts(q:str|None=None,limit:int=Query(100,ge=1,le=500),db:Session=Depends(get_db))->list[dict]:
     stmt=select(Host)
     if q: stmt=stmt.where(Host.visible_name.ilike(f"%{q}%"))
-    items=db.scalars(stmt.order_by(Host.visible_name).limit(limit)).all()
-    return [{"hostid":str(h.zabbix_hostid),"name":h.visible_name,"host":h.technical_name,"criticality":h.criticality,"groups":h.groups} for h in items]
-
+    items=db.scalars(stmt.order_by(Host.visible_name).limit(limit)).all(); return [{"hostid":str(h.zabbix_hostid),"name":h.visible_name,"host":h.technical_name,"criticality":h.criticality,"groups":h.groups} for h in items]
 @app.patch("/api/v1/hosts/{hostid}/criticality")
 def host_criticality(hostid:int,payload:dict=Body(...),db:Session=Depends(get_db))->dict:
     host=db.scalar(select(Host).where(Host.zabbix_hostid==hostid))
     if not host: raise HTTPException(status_code=404,detail="Host not found")
     host.criticality=max(-50,min(50,int(payload.get("points",0)))); db.commit(); return {"status":"ok","hostid":str(hostid),"criticality":host.criticality}
-
 @app.get("/api/v1/host-groups")
 def host_groups(db:Session=Depends(get_db))->list[dict]:
     items=db.scalars(select(HostGroup).order_by(HostGroup.name)).all(); return [{"groupid":str(g.zabbix_groupid),"name":g.name,"criticality":g.criticality} for g in items]
-
 @app.patch("/api/v1/host-groups/{groupid}/criticality")
 def group_criticality(groupid:int,payload:dict=Body(...),db:Session=Depends(get_db))->dict:
     group=db.scalar(select(HostGroup).where(HostGroup.zabbix_groupid==groupid))
     if not group: raise HTTPException(status_code=404,detail="Host group not found")
     group.criticality=max(-50,min(50,int(payload.get("points",0)))); db.commit(); return {"status":"ok","groupid":str(groupid),"criticality":group.criticality}
-
 @app.get("/api/v1/sites")
-def sites(db:Session=Depends(get_db))->dict:
-    items=site_analytics(db); return {"count":len(items),"items":items}
-
+def sites(db:Session=Depends(get_db))->dict: return {"count":len(items:=site_analytics(db)),"items":items}
 @app.get("/api/v1/attention")
 def attention(db:Session=Depends(get_db))->dict:
     items=site_analytics(db); important=[i for i in items if i["risk_score"]>=70 or i["unavailable_ratio"]>=50 or i["burst_15m"]>=5 or i["probable_cause"]]; return {"count":len(important),"items":important[:20]}
-
 @app.get("/api/v1/instability")
-def instability(db:Session=Depends(get_db))->dict:
-    items=instability_analytics(db); return {"count":len(items),"items":items[:100]}
-
+def instability(db:Session=Depends(get_db))->dict: return {"count":len(items:=instability_analytics(db)),"items":items[:100]}
 @app.get("/api/v1/stats")
-def stats(db:Session=Depends(get_db))->dict:
-    return {"host_groups":db.scalar(select(func.count()).select_from(HostGroup)),"hosts":db.scalar(select(func.count()).select_from(Host)),"triggers":db.scalar(select(func.count()).select_from(Trigger)),"active_problems":db.scalar(select(func.count()).select_from(Problem).where(Problem.active.is_(True)))}
-
+def stats(db:Session=Depends(get_db))->dict: return {"host_groups":db.scalar(select(func.count()).select_from(HostGroup)),"hosts":db.scalar(select(func.count()).select_from(Host)),"triggers":db.scalar(select(func.count()).select_from(Trigger)),"active_problems":db.scalar(select(func.count()).select_from(Problem).where(Problem.active.is_(True)))}
 @app.patch("/api/v1/problems/{eventid}/defer")
 def defer_problem(eventid:int,payload:dict=Body(...),db:Session=Depends(get_db))->dict:
     problem=db.scalar(select(Problem).where(Problem.zabbix_eventid==eventid))
     if not problem or not problem.active: raise HTTPException(status_code=404,detail="Active problem not found")
     raw_until=payload.get("until")
     if not raw_until: raise HTTPException(status_code=400,detail="until is required")
-    try:
-        until=datetime.fromisoformat(str(raw_until).replace("Z","+00:00")); until=until if until.tzinfo else until.replace(tzinfo=timezone.utc)
+    try: until=datetime.fromisoformat(str(raw_until).replace("Z","+00:00")); until=until if until.tzinfo else until.replace(tzinfo=timezone.utc)
     except ValueError as exc: raise HTTPException(status_code=400,detail="Invalid until datetime") from exc
     if until<=datetime.now(timezone.utc): raise HTTPException(status_code=400,detail="until must be in the future")
     problem.deferred_until=until; problem.deferred_reason=str(payload.get("reason") or "").strip() or None; problem.deferred_at=datetime.now(timezone.utc); db.commit(); return {"status":"ok","eventid":str(eventid),"deferred_until":problem.deferred_until}
-
 @app.delete("/api/v1/problems/{eventid}/defer")
 def undefer_problem(eventid:int,db:Session=Depends(get_db))->dict:
     problem=db.scalar(select(Problem).where(Problem.zabbix_eventid==eventid))
     if not problem: raise HTTPException(status_code=404,detail="Problem not found")
     problem.deferred_until=None; problem.deferred_reason=None; problem.deferred_at=None; db.commit(); return {"status":"ok","eventid":str(eventid)}
-
 @app.get("/api/v1/deferred-problems")
 def deferred_problems(db:Session=Depends(get_db))->dict:
-    now=datetime.now(timezone.utc); items=db.scalars(select(Problem).where(Problem.active.is_(True),Problem.deferred_until>now).order_by(Problem.deferred_until.asc(),Problem.impact_score.desc())).all()
-    result=[{"eventid":str(i.zabbix_eventid),"name":i.name,"severity":i.severity,"started_at":i.started_at,"hosts":i.hosts,"impact_score":i.impact_score,"deferred_until":i.deferred_until,"deferred_reason":i.deferred_reason,"deferred_at":i.deferred_at} for i in items]; return {"count":len(result),"items":result}
-
+    now=datetime.now(timezone.utc); items=db.scalars(select(Problem).where(Problem.active.is_(True),Problem.deferred_until>now).order_by(Problem.deferred_until.asc(),Problem.impact_score.desc())).all(); result=[{"eventid":str(i.zabbix_eventid),"name":i.name,"severity":i.severity,"started_at":i.started_at,"hosts":i.hosts,"impact_score":i.impact_score,"deferred_until":i.deferred_until,"deferred_reason":i.deferred_reason,"deferred_at":i.deferred_at} for i in items]; return {"count":len(result),"items":result}
 @app.get("/api/v1/problems")
 def problems(limit:int=Query(100,ge=1,le=1000),db:Session=Depends(get_db))->dict:
-    items=db.scalars(select(Problem).where(Problem.active.is_(True),((Problem.deferred_until.is_(None))|(Problem.deferred_until<=datetime.now(timezone.utc)))).order_by(Problem.impact_score.desc(),Problem.started_at.asc()).limit(limit)).all()
-    result=[{"eventid":str(i.zabbix_eventid),"objectid":str(i.zabbix_triggerid) if i.zabbix_triggerid else None,"name":i.name,"severity":i.severity,"acknowledged":i.acknowledged,"started_at":i.started_at,"hosts":i.hosts,"tags":i.tags,"impact_score":i.impact_score,"score_breakdown":i.score_breakdown} for i in items]; return {"count":len(result),"items":result}
-
+    items=db.scalars(select(Problem).where(Problem.active.is_(True),((Problem.deferred_until.is_(None))|(Problem.deferred_until<=datetime.now(timezone.utc)))).order_by(Problem.impact_score.desc(),Problem.started_at.asc()).limit(limit)).all(); result=[{"eventid":str(i.zabbix_eventid),"objectid":str(i.zabbix_triggerid) if i.zabbix_triggerid else None,"name":i.name,"severity":i.severity,"acknowledged":i.acknowledged,"started_at":i.started_at,"hosts":i.hosts,"tags":i.tags,"impact_score":i.impact_score,"score_breakdown":i.score_breakdown} for i in items]; return {"count":len(result),"items":result}
 @app.get("/api/v1/correlation/event-types")
 def correlation_event_types(q:str|None=None,limit:int=Query(80,ge=1,le=200),db:Session=Depends(get_db))->dict:
     since=datetime.now(timezone.utc)-timedelta(days=7); history=db.scalars(select(ProblemEvent).where(ProblemEvent.started_at>=since).order_by(ProblemEvent.started_at.desc()).limit(10000)).all(); active=db.scalars(select(Problem).where(Problem.active.is_(True)).order_by(Problem.started_at.desc()).limit(2000)).all(); query=(q or "").strip().lower(); grouped={}
@@ -159,17 +148,14 @@ def correlation_event_types(q:str|None=None,limit:int=Query(80,ge=1,le=200),db:S
         for hn in host_names:
             if hn and hn not in item["hosts"] and len(item["hosts"])<4: item["hosts"].append(hn)
     items=sorted(grouped.values(),key=lambda x:(-x["count"],x["name"].lower()))[:limit]; return {"count":len(items),"items":items,"query":q or ""}
-
 @app.get("/api/v1/correlation/rules")
 def correlation_rules(db:Session=Depends(get_db))->dict:
     items=db.scalars(select(CorrelationRule).order_by(CorrelationRule.name)).all(); return {"count":len(items),"items":[{"id":r.id,"name":r.name,"description":r.description,"window_minutes":r.window_minutes,"enabled":r.enabled,"steps":r.steps} for r in items]}
-
 @app.post("/api/v1/correlation/rules")
 def create_correlation_rule(payload:dict=Body(...),db:Session=Depends(get_db))->dict:
     name=str(payload.get("name") or "").strip(); steps=payload.get("steps") or []
     if not name or len(steps)<2: raise HTTPException(status_code=400,detail="Укажите название и минимум два события")
     now=datetime.now(timezone.utc); rule=CorrelationRule(name=name,description=str(payload.get("description") or "").strip() or None,window_minutes=max(1,min(1440,int(payload.get("window_minutes",120)))),enabled=bool(payload.get("enabled",True)),steps=steps,created_at=now,updated_at=now); db.add(rule); db.commit(); db.refresh(rule); return {"status":"ok","id":rule.id}
-
 @app.put("/api/v1/correlation/rules/{rule_id}")
 def update_correlation_rule(rule_id:int,payload:dict=Body(...),db:Session=Depends(get_db))->dict:
     rule=db.get(CorrelationRule,rule_id)
@@ -181,7 +167,6 @@ def update_correlation_rule(rule_id:int,payload:dict=Body(...),db:Session=Depend
         if len(payload["steps"])<2: raise HTTPException(status_code=400,detail="Нужно минимум два события")
         rule.steps=payload["steps"]
     rule.updated_at=datetime.now(timezone.utc); db.commit(); return {"status":"ok","id":rule.id}
-
 @app.delete("/api/v1/correlation/rules/{rule_id}")
 def delete_correlation_rule(rule_id:int,db:Session=Depends(get_db))->dict:
     rule=db.get(CorrelationRule,rule_id)
