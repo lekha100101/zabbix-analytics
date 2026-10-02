@@ -4,7 +4,7 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.models import Host, HostGroup, Problem, ProblemEvent, SyncRun
-from app.services.scoring import calculate_impact
+from app.services.scoring import calculate_impact, host_tags_for_problem, load_tag_rules
 from app.services.zabbix import ZabbixClient
 
 
@@ -53,14 +53,19 @@ async def sync_all(db: Session) -> dict:
                 "tags": item.get("tags", []),
                 "updated_at": utcnow(),
             })
+        # Flush host/tag changes so scoring below always sees the current Zabbix host tags.
+        db.flush()
         counts["hosts"] = len(hosts)
         counts["triggers"] = "deferred"
 
         db.execute(update(Problem).where(Problem.active.is_(True)).values(active=False, recovered_at=utcnow()))
 
+        tag_rules = load_tag_rules(db)
         problems = await client.problems(limit=1000)
         for item in problems:
-            impact_score, breakdown = calculate_impact(item)
+            score_input = dict(item)
+            score_input["host_tags"] = host_tags_for_problem(db, item.get("hosts", []))
+            impact_score, breakdown = calculate_impact(score_input, tag_rules)
             values = {
                 "zabbix_triggerid": int(item["objectid"]) if item.get("objectid") else None,
                 "name": item["name"],
