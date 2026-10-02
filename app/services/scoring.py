@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import Host, HostGroup, Problem, ScoringRule
+from app.models import Problem, ScoringRule
 
 
 SEVERITY_POINTS = {0: 2, 1: 5, 2: 12, 3: 22, 4: 35, 5: 50}
@@ -34,12 +34,12 @@ def load_tag_rules(db: Session) -> dict[tuple[str, str], int]:
     return {(str(r.key).lower(), str(r.value).lower()): r.points for r in rules if r.key and r.value}
 
 
-def calculate_impact(problem: dict, tag_rules: dict | None = None, host_points: int = 0, group_points: int = 0) -> tuple[int, dict]:
+def calculate_impact(problem: dict, tag_rules: dict | None = None) -> tuple[int, dict]:
     rules = tag_rules if tag_rules is not None else DEFAULT_TAG_RULES
     severity = int(problem.get("severity", 0))
     severity_points = SEVERITY_POINTS.get(severity, 2)
-    breakdown = {"severity": severity_points, "tags": [], "duration": 0, "unacknowledged": 0, "host_criticality": host_points, "group_criticality": group_points}
-    score = severity_points + host_points + group_points
+    breakdown = {"severity": severity_points, "tags": [], "duration": 0, "unacknowledged": 0}
+    score = severity_points
 
     seen = set()
     for tag in problem.get("tags", []) or []:
@@ -80,30 +80,16 @@ def calculate_impact(problem: dict, tag_rules: dict | None = None, host_points: 
     return final_score, breakdown
 
 
-def criticality_for_problem(db: Session, hosts: list[dict]) -> tuple[int, int]:
-    host_points = 0
-    group_points = 0
-    for ref in hosts or []:
-        hostid = ref.get("hostid")
-        if not hostid:
-            continue
-        host = db.scalar(select(Host).where(Host.zabbix_hostid == int(hostid)))
-        if not host:
-            continue
-        host_points = max(host_points, host.criticality or 0)
-        group_ids = [int(g["groupid"]) for g in (host.groups or []) if g.get("groupid")]
-        if group_ids:
-            value = db.scalar(select(HostGroup.criticality).where(HostGroup.zabbix_groupid.in_(group_ids)).order_by(HostGroup.criticality.desc()).limit(1))
-            group_points = max(group_points, value or 0)
-    return host_points, group_points
-
-
 def recalculate_all(db: Session) -> int:
     rules = load_tag_rules(db)
     problems = db.scalars(select(Problem).where(Problem.active.is_(True))).all()
     for item in problems:
-        host_points, group_points = criticality_for_problem(db, item.hosts)
-        score, breakdown = calculate_impact({"severity": item.severity, "tags": item.tags, "started_at": item.started_at, "acknowledged": item.acknowledged}, rules, host_points, group_points)
+        score, breakdown = calculate_impact({
+            "severity": item.severity,
+            "tags": item.tags,
+            "started_at": item.started_at,
+            "acknowledged": item.acknowledged,
+        }, rules)
         item.impact_score = score
         item.score_breakdown = breakdown
     db.commit()
