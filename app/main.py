@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import Base, engine, get_db
-from app.models import CorrelationRule, Host, HostGroup, Problem, ProblemEvent, ScoringRule, Trigger
+from app.models import CorrelationRule, Host, HostGroup, Problem, ProblemEvent, ProblemView, ScoringRule, Trigger
 from app.services.scoring import ensure_default_rules, recalculate_all
 from app.services.instability import instability_analytics
 from app.services.sites import site_analytics
@@ -172,3 +172,65 @@ def delete_correlation_rule(rule_id:int,db:Session=Depends(get_db))->dict:
     rule=db.get(CorrelationRule,rule_id)
     if not rule: raise HTTPException(status_code=404,detail="Правило не найдено")
     db.delete(rule); db.commit(); return {"status":"ok"}
+
+
+def problem_view_dict(v: ProblemView) -> dict:
+    return {"id":v.id,"name":v.name,"description":v.description,"tag_source":v.tag_source,"tag_key":v.tag_key,"tag_value":v.tag_value,"enabled":v.enabled}
+
+def _has_tag(tags, key: str, value: str) -> bool:
+    key=key.strip().lower(); value=value.strip().lower()
+    return any(str(t.get("tag","")).strip().lower()==key and str(t.get("value","")).strip().lower()==value for t in (tags or []))
+
+def _view_problem_items(db: Session, view: ProblemView) -> list[dict]:
+    hosts=db.scalars(select(Host)).all(); host_by_id={int(h.zabbix_hostid):h for h in hosts}; matched_hostids={hid for hid,h in host_by_id.items() if _has_tag(h.tags,view.tag_key,view.tag_value)}
+    problems=db.scalars(select(Problem).where(Problem.active.is_(True)).order_by(Problem.impact_score.desc(),Problem.started_at.asc())).all(); result=[]
+    for p in problems:
+        p_hostids=set()
+        for h in p.hosts or []:
+            try: p_hostids.add(int(h.get("hostid")))
+            except (TypeError,ValueError): pass
+        host_match=bool(p_hostids & matched_hostids); problem_match=_has_tag(p.tags,view.tag_key,view.tag_value)
+        if view.tag_source=="host" and not host_match: continue
+        if view.tag_source=="problem" and not problem_match: continue
+        if view.tag_source=="any" and not (host_match or problem_match): continue
+        result.append({"eventid":str(p.zabbix_eventid),"name":p.name,"severity":p.severity,"acknowledged":p.acknowledged,"started_at":p.started_at,"hosts":p.hosts,"tags":p.tags,"impact_score":p.impact_score,"score_breakdown":p.score_breakdown,"matched_by":{"host_tag":host_match,"problem_tag":problem_match}})
+    return result
+
+@app.get("/api/v1/problem-views")
+def problem_views(db:Session=Depends(get_db))->dict:
+    items=db.scalars(select(ProblemView).order_by(ProblemView.name)).all(); return {"count":len(items),"items":[problem_view_dict(v) for v in items]}
+
+@app.post("/api/v1/problem-views")
+def create_problem_view(payload:dict=Body(...),db:Session=Depends(get_db))->dict:
+    name=str(payload.get("name") or "").strip(); key=str(payload.get("tag_key") or "").strip(); value=str(payload.get("tag_value") or "").strip(); source=str(payload.get("tag_source") or "host").strip().lower()
+    if not name or not key or not value: raise HTTPException(status_code=400,detail="Укажите название, tag key и tag value")
+    if source not in {"host","problem","any"}: raise HTTPException(status_code=400,detail="tag_source: host, problem или any")
+    now=datetime.now(timezone.utc); v=ProblemView(name=name,description=str(payload.get("description") or "").strip() or None,tag_source=source,tag_key=key,tag_value=value,enabled=True,created_at=now,updated_at=now); db.add(v)
+    try: db.commit(); db.refresh(v)
+    except IntegrityError: db.rollback(); raise HTTPException(status_code=409,detail="Представление с таким названием уже существует")
+    return {"status":"ok","view":problem_view_dict(v)}
+
+@app.delete("/api/v1/problem-views/{view_id}")
+def delete_problem_view(view_id:int,db:Session=Depends(get_db))->dict:
+    v=db.get(ProblemView,view_id)
+    if not v: raise HTTPException(status_code=404,detail="Представление не найдено")
+    db.delete(v); db.commit(); return {"status":"ok"}
+
+@app.get("/api/v1/problem-views/{view_id}/problems")
+def problem_view_problems(view_id:int,db:Session=Depends(get_db))->dict:
+    v=db.get(ProblemView,view_id)
+    if not v: raise HTTPException(status_code=404,detail="Представление не найдено")
+    items=_view_problem_items(db,v); return {"view":problem_view_dict(v),"count":len(items),"items":items}
+
+@app.get("/api/v1/tags")
+def known_tags(source:str=Query("host",pattern="^(host|problem|any)$"),db:Session=Depends(get_db))->dict:
+    pairs=set()
+    if source in {"host","any"}:
+        for h in db.scalars(select(Host)).all():
+            for t in h.tags or []:
+                if t.get("tag") is not None and t.get("value") is not None: pairs.add((str(t["tag"]),str(t["value"])))
+    if source in {"problem","any"}:
+        for p in db.scalars(select(Problem).where(Problem.active.is_(True))).all():
+            for t in p.tags or []:
+                if t.get("tag") is not None and t.get("value") is not None: pairs.add((str(t["tag"]),str(t["value"])))
+    return {"count":len(pairs),"items":[{"tag":k,"value":v} for k,v in sorted(pairs,key=lambda x:(x[0].lower(),x[1].lower()))]}
