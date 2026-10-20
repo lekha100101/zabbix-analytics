@@ -116,3 +116,17 @@ class CorrelationRule(Base):
     steps: Mapped[list] = mapped_column(JSONB, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class ProblemView(Base):
+    __tablename__ = "problem_views"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tag_source: Mapped[str] = mapped_column(String(16), default="host", index=True)
+    tag_key: Mapped[str] = mapped_column(String(255), index=True)
+    tag_value: Mapped[str] = mapped_column(String(255), index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
