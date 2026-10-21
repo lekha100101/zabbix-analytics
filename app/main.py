@@ -1,4 +1,4 @@
-from pathlib import Path
+from pathlib import Path\nfrom fnmatch import fnmatchcase
 from datetime import datetime, timezone, timedelta
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import Base, engine, get_db
-from app.models import CorrelationRule, Host, HostGroup, Problem, ProblemEvent, ProblemView, ScoringRule, Trigger
+from app.models import CorrelationRule, Host, HostGroup, Problem, ProblemEvent, ProblemView, ScoringRule, Trigger, InternetRule
 from app.services.scoring import ensure_default_rules, recalculate_all
 from app.services.instability import instability_analytics
 from app.services.sites import site_analytics
@@ -54,14 +54,66 @@ def dashboard_overview(db: Session = Depends(get_db)) -> dict:
     wan_down=sum(1 for x in wan_sites if not x["available"]); important_candidates=[x for x in sites if x["internet_status"]!="down" and (x["active_problems"] or x["risk_score"])]; important=sorted(important_candidates,key=lambda x:(-x["unavailable_hosts"],-x["risk_score"],-x["max_problem_score"],x["site_key"]))[:12]; internet_down=sorted([x for x in sites if x["internet_status"]=="down"],key=lambda x:(-x["risk_score"],x["site_key"]))
     return {"objects":{"total":len(sites),"healthy":healthy_sites,"with_unavailable_hosts":unavailable_sites,"critical":critical_sites},"hosts":{"total":total_hosts,"available":healthy_hosts,"unavailable":unavailable_hosts,"affected":affected_hosts,"availability_percent":round(healthy_hosts/total_hosts*100,2) if total_hosts else 100.0},"internet":{"total":len(wan_sites),"available":len(wan_sites)-wan_down,"unavailable":wan_down},"important_objects":important,"internet_down_objects":internet_down,"internet_channels":sorted(wan_sites,key=lambda x:(x["available"],-x["risk_score"],x["site_key"]))}
 
+def _internet_rule_dict(r:InternetRule)->dict:
+    return {"id":r.id,"name":r.name,"rule_type":r.rule_type,"key":r.key,"value":r.value,"enabled":r.enabled,"priority":r.priority}
+
+def _internet_match(host:Host,rules:list[InternetRule])->bool:
+    for r in rules:
+        if r.rule_type=="host_mask":
+            if fnmatchcase((host.technical_name or "").lower(),r.value.lower()) or fnmatchcase((host.visible_name or "").lower(),r.value.lower()): return True
+        elif r.rule_type=="host_tag":
+            if any(str(t.get("tag","")).lower()==str(r.key or "").lower() and str(t.get("value","")).lower()==r.value.lower() for t in host.tags or []): return True
+    return False
+
+@app.get("/api/v1/internet/rules")
+def internet_rules(db:Session=Depends(get_db))->dict:
+    items=db.scalars(select(InternetRule).order_by(InternetRule.priority,InternetRule.id)).all();return {"count":len(items),"items":[_internet_rule_dict(r) for r in items]}
+
+@app.post("/api/v1/internet/rules")
+def create_internet_rule(payload:dict=Body(...),db:Session=Depends(get_db))->dict:
+    name=str(payload.get("name") or "").strip();typ=str(payload.get("rule_type") or "host_tag").lower();key=str(payload.get("key") or "").strip() or None;value=str(payload.get("value") or "").strip()
+    if not name or not value or typ not in {"host_tag","host_mask"} or (typ=="host_tag" and not key): raise HTTPException(status_code=400,detail="Проверьте название и условие правила")
+    r=InternetRule(name=name,rule_type=typ,key=key,value=value,enabled=bool(payload.get("enabled",True)),priority=int(payload.get("priority",100)));db.add(r)
+    try:db.commit();db.refresh(r)
+    except IntegrityError:db.rollback();raise HTTPException(status_code=409,detail="Правило с таким названием уже существует")
+    return {"status":"ok","rule":_internet_rule_dict(r)}
+
+@app.delete("/api/v1/internet/rules/{rule_id}")
+def delete_internet_rule(rule_id:int,db:Session=Depends(get_db))->dict:
+    r=db.get(InternetRule,rule_id)
+    if not r:raise HTTPException(status_code=404,detail="Правило не найдено")
+    db.delete(r);db.commit();return {"status":"ok"}
+
+@app.get("/api/v1/internet/status")
+def internet_status(db:Session=Depends(get_db))->dict:
+    rules=db.scalars(select(InternetRule).where(InternetRule.enabled.is_(True))).all()
+    if not rules:
+        rules=[InternetRule(name="Default gateway tag",rule_type="host_tag",key="hardware",value="gateway",enabled=True,priority=100)]
+    hosts=[h for h in db.scalars(select(Host)).all() if _internet_match(h,rules)];ids={int(h.zabbix_hostid) for h in hosts};down={}
+    for p in db.scalars(select(Problem).where(Problem.active.is_(True))).all():
+        name=(p.name or "").lower()
+        if not any(x in name for x in ("unavailable by icmp","icmp ping is unavailable","icmp ping unavailable","host is unreachable","host unreachable","is unreachable","not reachable","no ping","agent is not available","agent is unavailable","snmp agent is not available","snmp unavailable","interface is down","link is down","link down","host is down")):continue
+        for ph in p.hosts or []:
+            try:hid=int(ph.get("hostid"))
+            except (TypeError,ValueError):continue
+            if hid in ids:
+                current=down.get(hid)
+                if current is None or p.impact_score>current["score"]:down[hid]={"problem":p.name,"score":p.impact_score,"started_at":p.started_at}
+    unavailable=[]
+    for h in hosts:
+        item=down.get(int(h.zabbix_hostid))
+        if item:unavailable.append({"hostid":str(h.zabbix_hostid),"name":h.visible_name,"host":h.technical_name,**item})
+    unavailable.sort(key=lambda x:(-x["score"],x["name"]))
+    return {"total":len(hosts),"unavailable":len(unavailable),"available":len(hosts)-len(unavailable),"availability_percent":round((len(hosts)-len(unavailable))/len(hosts)*100,2) if hosts else 100.0,"items":unavailable}
+
 @app.post("/api/v1/scoring/recalculate")
 def recalculate(db: Session = Depends(get_db)) -> dict: return {"status":"ok","recalculated":recalculate_all(db)}
 def scoring_rule_dict(r:ScoringRule)->dict: return {"id":r.id,"name":r.name,"rule_type":r.rule_type,"key":r.key,"value":r.value,"points":r.points,"enabled":r.enabled,"priority":r.priority}
 def scoring_payload(payload:dict)->dict:
     name=str(payload.get("name") or "").strip(); rule_type=str(payload.get("rule_type") or "tag").strip().lower(); key=str(payload.get("key") or "").strip() or None; value=str(payload.get("value") or "").strip() or None
     if not name: raise HTTPException(status_code=400,detail="Укажите название правила")
-    if rule_type not in {"tag","severity","duration","unacknowledged"}: raise HTTPException(status_code=400,detail="Неизвестный тип правила")
-    if rule_type=="tag" and (not key or not value): raise HTTPException(status_code=400,detail="Для tag-правила нужны key и value")
+    if rule_type not in {"tag","host_mask","severity","duration","unacknowledged"}: raise HTTPException(status_code=400,detail="Неизвестный тип правила")
+    if rule_type=="tag" and (not key or not value): raise HTTPException(status_code=400,detail="Для tag-правила нужны key и value")\n    if rule_type=="host_mask" and not value: raise HTTPException(status_code=400,detail="Для Host mask укажите маску, например UPS-*")
     return {"name":name,"rule_type":rule_type,"key":key,"value":value,"points":max(-100,min(100,int(payload.get("points",0)))),"enabled":bool(payload.get("enabled",True)),"priority":max(1,min(10000,int(payload.get("priority",100))))}
 @app.get("/api/v1/scoring/rules")
 def scoring_rules(db: Session = Depends(get_db)) -> list[dict]:
