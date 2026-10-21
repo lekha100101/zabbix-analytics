@@ -50,7 +50,7 @@ def dashboard_overview(db: Session = Depends(get_db)) -> dict:
     sites=site_analytics(db); total_hosts=sum(x["hosts_total"] for x in sites); unavailable_hosts=sum(x["unavailable_hosts"] for x in sites); affected_hosts=sum(x["affected_hosts"] for x in sites); healthy_hosts=max(0,total_hosts-unavailable_hosts); healthy_sites=sum(1 for x in sites if x["active_problems"]==0); unavailable_sites=sum(1 for x in sites if x["unavailable_hosts"]>0); critical_sites=sum(1 for x in sites if x["risk_score"]>=70); wan_sites=[]
     for x in sites:
         gateways=int((x.get("roles") or {}).get("gateway",0))
-        if gateways: wan_sites.append({"site_key":x["site_key"],"gateways":gateways,"available":not x["gateway_affected"],"risk_score":x["risk_score"],"cause":x["probable_cause"]})
+        if gateways: wan_sites.append({"site_key":x["site_key"],"gateways":gateways,"available":x.get("internet_status")=="up","risk_score":x["risk_score"],"cause":x["probable_cause"]})
     wan_down=sum(1 for x in wan_sites if not x["available"]); important=sorted([x for x in sites if x["active_problems"] or x["risk_score"]],key=lambda x:(-x["risk_score"],-x["unavailable_ratio"],x["site_key"]))[:12]
     return {"objects":{"total":len(sites),"healthy":healthy_sites,"with_unavailable_hosts":unavailable_sites,"critical":critical_sites},"hosts":{"total":total_hosts,"available":healthy_hosts,"unavailable":unavailable_hosts,"affected":affected_hosts,"availability_percent":round(healthy_hosts/total_hosts*100,2) if total_hosts else 100.0},"internet":{"total":len(wan_sites),"available":len(wan_sites)-wan_down,"unavailable":wan_down},"important_objects":important,"internet_channels":sorted(wan_sites,key=lambda x:(x["available"],-x["risk_score"],x["site_key"]))}
 
