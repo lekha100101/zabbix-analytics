@@ -30,6 +30,14 @@ def equipment_role(equipment: str) -> str:
         if any(value.startswith(prefix) for prefix in prefixes): return role
     return "other"
 
+def host_role(host: Host, equipment: str) -> str:
+    for tag in host.tags or []:
+        if str(tag.get("tag") or "").strip().lower()=="hardware":
+            value=str(tag.get("value") or "").strip().lower()
+            if value in {"gateway","router"}: return "gateway"
+            if value in {"switch","server","server_mgmt","ups","pacs","database","storage"}: return value
+    return equipment_role(equipment)
+
 def site_groups(host: Host) -> list[dict]:
     result=[]
     for group in host.groups or []:
@@ -73,7 +81,7 @@ def site_analytics(db: Session) -> list[dict]:
     for host in hosts:
         groups=site_groups(host)
         if not groups: continue
-        host_map[int(host.zabbix_hostid)]=(host,groups); equipment=equipment_from_host(host); role=equipment_role(equipment)
+        host_map[int(host.zabbix_hostid)]=(host,groups); equipment=equipment_from_host(host); role=host_role(host,equipment)
         for parsed in groups:
             site=sites.setdefault(parsed["site_key"],{"site_key":parsed["site_key"],"zabbix_groupid":parsed["groupid"],"zabbix_group_name":parsed["group_name"],"region":parsed["region"],"site":parsed["site"],"hosts_total":0,"affected_hostids":set(),"unavailable_hostids":set(),"gateway_hostids":set(),"wan_unavailable_hostids":set(),"gateway_hosts":[],"hosts":[],"equipment":defaultdict(int),"roles":defaultdict(int),"problems":[]})
             hid=int(host.zabbix_hostid); site["hosts_total"]+=1; site["equipment"][equipment]+=1; site["roles"][role]+=1
@@ -85,7 +93,7 @@ def site_analytics(db: Session) -> list[dict]:
         for hostid in _problem_hostids(problem):
             item=host_map.get(hostid)
             if not item: continue
-            host,groups=item; equipment=equipment_from_host(host); role=equipment_role(equipment)
+            host,groups=item; equipment=equipment_from_host(host); role=host_role(host,equipment)
             for parsed in groups:
                 key=parsed["site_key"]; sites[key]["affected_hostids"].add(hostid)
                 if availability: sites[key]["unavailable_hostids"].add(hostid)
