@@ -25,7 +25,11 @@ app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
 
 @app.on_event("startup")
-def startup() -> None: Base.metadata.create_all(bind=engine)
+def startup() -> None:
+    Base.metadata.create_all(bind=engine)
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE problem_views ADD COLUMN IF NOT EXISTS match_mode VARCHAR(8) DEFAULT 'and'"))
+        conn.execute(text("ALTER TABLE problem_views ADD COLUMN IF NOT EXISTS conditions JSONB DEFAULT '[]'::jsonb"))
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request): return templates.TemplateResponse(request=request, name="index.html")
 @app.get("/health")
@@ -174,27 +178,49 @@ def delete_correlation_rule(rule_id:int,db:Session=Depends(get_db))->dict:
     db.delete(rule); db.commit(); return {"status":"ok"}
 
 
+def _view_conditions(v: ProblemView) -> list[dict]:
+    items=v.conditions or []
+    if items: return items
+    if v.tag_key and v.tag_value: return [{"source":v.tag_source or "host","key":v.tag_key,"value":v.tag_value}]
+    return []
+
 def problem_view_dict(v: ProblemView) -> dict:
-    return {"id":v.id,"name":v.name,"description":v.description,"tag_source":v.tag_source,"tag_key":v.tag_key,"tag_value":v.tag_value,"enabled":v.enabled}
+    return {"id":v.id,"name":v.name,"description":v.description,"match_mode":v.match_mode or "and","conditions":_view_conditions(v),"enabled":v.enabled}
 
 def _has_tag(tags, key: str, value: str) -> bool:
     key=key.strip().lower(); value=value.strip().lower()
     return any(str(t.get("tag","")).strip().lower()==key and str(t.get("value","")).strip().lower()==value for t in (tags or []))
 
+def _condition_matches(condition:dict, problem:Problem, hostids:set[int], host_by_id:dict[int,Host]) -> bool:
+    source=str(condition.get("source") or "host").lower(); key=str(condition.get("key") or ""); value=str(condition.get("value") or "")
+    host_match=any(_has_tag(host_by_id[hid].tags,key,value) for hid in hostids if hid in host_by_id)
+    problem_match=_has_tag(problem.tags,key,value)
+    return host_match if source=="host" else problem_match if source=="problem" else host_match or problem_match
+
 def _view_problem_items(db: Session, view: ProblemView) -> list[dict]:
-    hosts=db.scalars(select(Host)).all(); host_by_id={int(h.zabbix_hostid):h for h in hosts}; matched_hostids={hid for hid,h in host_by_id.items() if _has_tag(h.tags,view.tag_key,view.tag_value)}
+    host_by_id={int(h.zabbix_hostid):h for h in db.scalars(select(Host)).all()}; conditions=_view_conditions(view); mode=(view.match_mode or "and").lower()
     problems=db.scalars(select(Problem).where(Problem.active.is_(True)).order_by(Problem.impact_score.desc(),Problem.started_at.asc())).all(); result=[]
     for p in problems:
-        p_hostids=set()
+        hostids=set()
         for h in p.hosts or []:
-            try: p_hostids.add(int(h.get("hostid")))
+            try: hostids.add(int(h.get("hostid")))
             except (TypeError,ValueError): pass
-        host_match=bool(p_hostids & matched_hostids); problem_match=_has_tag(p.tags,view.tag_key,view.tag_value)
-        if view.tag_source=="host" and not host_match: continue
-        if view.tag_source=="problem" and not problem_match: continue
-        if view.tag_source=="any" and not (host_match or problem_match): continue
-        result.append({"eventid":str(p.zabbix_eventid),"name":p.name,"severity":p.severity,"acknowledged":p.acknowledged,"started_at":p.started_at,"hosts":p.hosts,"tags":p.tags,"impact_score":p.impact_score,"score_breakdown":p.score_breakdown,"matched_by":{"host_tag":host_match,"problem_tag":problem_match}})
+        matches=[_condition_matches(x,p,hostids,host_by_id) for x in conditions]
+        if not matches or (mode=="and" and not all(matches)) or (mode=="or" and not any(matches)): continue
+        result.append({"eventid":str(p.zabbix_eventid),"name":p.name,"severity":p.severity,"acknowledged":p.acknowledged,"started_at":p.started_at,"hosts":p.hosts,"tags":p.tags,"impact_score":p.impact_score,"score_breakdown":p.score_breakdown})
     return result
+
+def _problem_view_payload(payload:dict)->dict:
+    name=str(payload.get("name") or "").strip(); mode=str(payload.get("match_mode") or "and").lower(); raw=payload.get("conditions") or []
+    conditions=[]
+    for x in raw:
+        source=str(x.get("source") or "host").lower(); key=str(x.get("key") or "").strip(); value=str(x.get("value") or "").strip()
+        if source not in {"host","problem","any"}: raise HTTPException(status_code=400,detail="Источник тега: host, problem или any")
+        if key and value: conditions.append({"source":source,"key":key,"value":value})
+    if not name or not conditions: raise HTTPException(status_code=400,detail="Укажите название и минимум одно условие")
+    if mode not in {"and","or"}: raise HTTPException(status_code=400,detail="match_mode: and или or")
+    first=conditions[0]
+    return {"name":name,"description":str(payload.get("description") or "").strip() or None,"tag_source":first["source"],"tag_key":first["key"],"tag_value":first["value"],"match_mode":mode,"conditions":conditions,"enabled":bool(payload.get("enabled",True))}
 
 @app.get("/api/v1/problem-views")
 def problem_views(db:Session=Depends(get_db))->dict:
@@ -202,13 +228,17 @@ def problem_views(db:Session=Depends(get_db))->dict:
 
 @app.post("/api/v1/problem-views")
 def create_problem_view(payload:dict=Body(...),db:Session=Depends(get_db))->dict:
-    name=str(payload.get("name") or "").strip(); key=str(payload.get("tag_key") or "").strip(); value=str(payload.get("tag_value") or "").strip(); source=str(payload.get("tag_source") or "host").strip().lower()
-    if not name or not key or not value: raise HTTPException(status_code=400,detail="Укажите название, tag key и tag value")
-    if source not in {"host","problem","any"}: raise HTTPException(status_code=400,detail="tag_source: host, problem или any")
-    now=datetime.now(timezone.utc); v=ProblemView(name=name,description=str(payload.get("description") or "").strip() or None,tag_source=source,tag_key=key,tag_value=value,enabled=True,created_at=now,updated_at=now); db.add(v)
+    data=_problem_view_payload(payload); now=datetime.now(timezone.utc); v=ProblemView(**data,created_at=now,updated_at=now); db.add(v)
     try: db.commit(); db.refresh(v)
     except IntegrityError: db.rollback(); raise HTTPException(status_code=409,detail="Представление с таким названием уже существует")
     return {"status":"ok","view":problem_view_dict(v)}
+
+@app.put("/api/v1/problem-views/{view_id}")
+def update_problem_view(view_id:int,payload:dict=Body(...),db:Session=Depends(get_db))->dict:
+    v=db.get(ProblemView,view_id)
+    if not v: raise HTTPException(status_code=404,detail="Представление не найдено")
+    for k,val in _problem_view_payload(payload).items(): setattr(v,k,val)
+    v.updated_at=datetime.now(timezone.utc); db.commit(); return {"status":"ok","view":problem_view_dict(v)}
 
 @app.delete("/api/v1/problem-views/{view_id}")
 def delete_problem_view(view_id:int,db:Session=Depends(get_db))->dict:
@@ -234,3 +264,4 @@ def known_tags(source:str=Query("host",pattern="^(host|problem|any)$"),db:Sessio
             for t in p.tags or []:
                 if t.get("tag") is not None and t.get("value") is not None: pairs.add((str(t["tag"]),str(t["value"])))
     return {"count":len(pairs),"items":[{"tag":k,"value":v} for k,v in sorted(pairs,key=lambda x:(x[0].lower(),x[1].lower()))]}
+
