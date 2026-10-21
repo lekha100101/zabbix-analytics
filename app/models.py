@@ -127,6 +127,8 @@ class ProblemView(Base):
     tag_source: Mapped[str] = mapped_column(String(16), default="host", index=True)
     tag_key: Mapped[str] = mapped_column(String(255), index=True)
     tag_value: Mapped[str] = mapped_column(String(255), index=True)
+    match_mode: Mapped[str] = mapped_column(String(8), default="and")
+    conditions: Mapped[list] = mapped_column(JSONB, default=list)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
