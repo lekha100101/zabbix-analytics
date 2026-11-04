@@ -80,10 +80,11 @@ async def capacity_report(db:Session,days:int=30)->dict:
     for offset in range(0,len(ids),100):
         batch=ids[offset:offset+100]
         raw=await client.call("item.get",{"output":["itemid","hostid","name","key_","lastvalue","value_type","units"],"hostids":batch,
-            "filter":{"status":0},"search":{"key_":"vfs.fs.size["},"sortfield":"itemid"})
+            "filter":{"status":0},"search":{"key_":"vfs.fs."},"sortfield":"itemid"})
         diagnostics["candidate_items"]+=len(raw)
         for item in raw:
             key=str(item.get("key_") or "")
+            if not (key.startswith("vfs.fs.size[") or key.startswith("vfs.fs.dependent.size[")):continue
             if not key.endswith(",used]"):continue
             diagnostics["used_items"]+=1
             try:used=float(item.get("lastvalue") or 0)
@@ -100,7 +101,9 @@ async def capacity_report(db:Session,days:int=30)->dict:
             try:total=float(totals[0]["lastvalue"])
             except (ValueError,TypeError):continue
             if total<=0:continue
-            trends=await client.call("trend.get",{"output":["clock","value_avg"],"itemids":[item["itemid"]],"time_from":start,"time_till":now,"sortfield":"clock","sortorder":"ASC","limit":2000})
+            trend_method="trend.get" if str(item.get("value_type")) in ("0","3") else None
+            if trend_method is None:continue
+            trends=await client.call(trend_method,{"output":["clock","value_avg"],"itemids":[item["itemid"]],"time_from":start,"time_till":now,"sortfield":"clock","sortorder":"ASC","limit":2000})
             points=[]
             for row in trends:
                 try:points.append((int(row["clock"]),float(row["value_avg"])))
