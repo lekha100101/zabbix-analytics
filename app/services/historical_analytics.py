@@ -72,49 +72,152 @@ def _series_forecast(points:list[tuple[int,float]],total:float,now:int)->dict:
         return round((total*pct-current)/growth/86400,1)
     return {"growth_gb_day":round(growth/1024**3,2),"days_to_85":eta(.85),"days_to_95":eta(.95),"confidence":"estimate"}
 
-async def capacity_report(db:Session,days:int=30)->dict:
-    client=ZabbixClient();host_sites=_site_hosts(db)
-    ids=[str(i) for i in host_sites]
-    now=int(datetime.now(timezone.utc).timestamp());start=now-days*86400
-    items=[]; diagnostics={"candidate_items":0,"used_items":0,"missing_total":0,"empty_values":0,"missing_trends":0}
-    for offset in range(0,len(ids),100):
-        batch=ids[offset:offset+100]
-        raw=await client.call("item.get",{"output":["itemid","hostid","name","key_","lastvalue","value_type","units"],"hostids":batch,
-            "filter":{"status":0},"search":{"key_":"vfs.fs."},"sortfield":"itemid"})
-        diagnostics["candidate_items"]+=len(raw)
-        for item in raw:
-            key=str(item.get("key_") or "")
-            if not (key.startswith("vfs.fs.size[") or key.startswith("vfs.fs.dependent.size[")):
-                continue
-            if not key.endswith(",used]"):
-                continue
-            diagnostics["used_items"]+=1
-            try:used=float(item.get("lastvalue") or 0)
-            except (ValueError,TypeError):continue
-            if used<=0:
-                diagnostics["empty_values"]+=1
-                continue
-            total_key=key[:-6]+",total]"
-            # Request total item by exact key, not by guessing from percentage.
-            totals=await client.call("item.get",{"output":["itemid","lastvalue"],"hostids":[item["hostid"]],"filter":{"key_":total_key,"status":0}})
-            if not totals:
-                diagnostics["missing_total"]+=1
-                continue
-            try:total=float(totals[0]["lastvalue"])
-            except (ValueError,TypeError):continue
-            if total<=0:continue
-            trend_method="trend.get" if str(item.get("value_type")) in ("0","3") else None
-            if trend_method is None:continue
-            trends=await client.call(trend_method,{"output":["clock","value_avg"],"itemids":[item["itemid"]],"time_from":start,"time_till":now,"sortfield":"clock","sortorder":"ASC","limit":2000})
-            points=[]
-            for row in trends:
-                try:points.append((int(row["clock"]),float(row["value_avg"])))
-                except (TypeError,ValueError,KeyError):pass
-            if not points:diagnostics["missing_trends"]+=1
-            forecast=_series_forecast(points,total,now)
-            for site in host_sites.get(int(item["hostid"]),()):
-                items.append({"site_key":site,"hostid":str(item["hostid"]),"itemid":str(item["itemid"]),"filesystem":key[12:-6],
-                    "used_percent":round(used/total*100,1),"used_tb":round(used/1024**4,2),"total_tb":round(total/1024**4,2),
-                    "samples":len(points),**forecast})
-    items.sort(key=lambda x:(x["days_to_95"] is None,x["days_to_95"] if x["days_to_95"] is not None else 999999,-x["used_percent"]))
-    return {"days":days,"count":len(items),"diagnostics":diagnostics,"note":"Прогноз по hourly trends vfs.fs.size; значения являются оценкой. Для других шаблонов метрик требуется настройка соответствия items.","items":items}
+# Process-local TTL cache; avoids repeating a costly Zabbix scan on each page load.
+import asyncio
+import time
+
+_CAPACITY_CACHE = {}
+_CAPACITY_LOCK = asyncio.Lock()
+_CAPACITY_TTL = 900
+
+
+async def capacity_report(db: Session, days: int = 30) -> dict:
+    now_mono = time.monotonic()
+    cached = _CAPACITY_CACHE.get(days)
+    if cached and now_mono - cached[0] < _CAPACITY_TTL:
+        return {**cached[1], "cached": True}
+
+    async with _CAPACITY_LOCK:
+        cached = _CAPACITY_CACHE.get(days)
+        if cached and time.monotonic() - cached[0] < _CAPACITY_TTL:
+            return {**cached[1], "cached": True}
+
+        client = ZabbixClient()
+        host_sites = _site_hosts(db)
+        ids = [str(hostid) for hostid in host_sites]
+        now = int(datetime.now(timezone.utc).timestamp())
+        start = now - days * 86400
+        diagnostics = {
+            "hosts": len(ids), "candidate_items": 0, "used_items": 0,
+            "missing_total": 0, "empty_values": 0,
+            "missing_trends": 0, "trend_requests": 0, "trend_errors": 0,
+        }
+        disks = []
+        # One item.get per 100 hosts. Pair used/total locally, never per disk.
+        for offset in range(0, len(ids), 100):
+            raw = await client.call("item.get", {
+                "output": ["itemid", "hostid", "name", "key_", "lastvalue", "value_type", "units"],
+                "hostids": ids[offset:offset + 100],
+                "filter": {"status": 0},
+                "search": {"key_": "vfs.fs."},
+            })
+            diagnostics["candidate_items"] += len(raw)
+            by_key = {(str(item["hostid"]), str(item["key_"])): item for item in raw}
+            for item in raw:
+                key = str(item.get("key_") or "")
+                if not (key.startswith("vfs.fs.size[") or key.startswith("vfs.fs.dependent.size[")):
+                    continue
+                if not key.endswith(",used]"):
+                    continue
+                diagnostics["used_items"] += 1
+                total_item = by_key.get((str(item["hostid"]), key[:-6] + ",total]"))
+                if total_item is None:
+                    diagnostics["missing_total"] += 1
+                    continue
+                try:
+                    used = float(item["lastvalue"])
+                    total = float(total_item["lastvalue"])
+                except (ValueError, TypeError, KeyError):
+                    diagnostics["empty_values"] += 1
+                    continue
+                if used <= 0 or total <= 0:
+                    diagnostics["empty_values"] += 1
+                    continue
+                disks.append((item, key, used, total))
+
+        # Query only the first and last 24h windows. Each trend.get is bounded
+        # to 50 itemids x 24 hourly rows, rather than days*24 per disk.
+        series = defaultdict(lambda: {"first": [], "last": []})
+        numeric_ids = [
+            str(item["itemid"]) for item, _, _, _ in disks
+            if str(item.get("value_type")) in ("0", "3")
+        ]
+        for offset in range(0, len(numeric_ids), 50):
+            batch = numeric_ids[offset:offset + 50]
+            for label, t_from, t_till in (
+                ("first", start, start + 86400),
+                ("last", now - 86400, now),
+            ):
+                diagnostics["trend_requests"] += 1
+                try:
+                    rows = await client.call("trend.get", {
+                        "output": ["itemid", "clock", "value_avg"],
+                        "itemids": batch, "time_from": t_from, "time_till": t_till,
+                        "limit": 5000,
+                    })
+                except Exception:
+                    diagnostics["trend_errors"] += 1
+                    continue
+                for row in rows:
+                    try:
+                        series[str(row["itemid"])][label].append(
+                            (int(row["clock"]), float(row["value_avg"]))
+                        )
+                    except (KeyError, ValueError, TypeError):
+                        continue
+
+        items = []
+        for item, key, used, total in disks:
+            history = series[str(item["itemid"])]
+            first = history["first"]
+            last = history["last"]
+            if first and last:
+                t0 = sum(p[0] for p in first) / len(first)
+                t1 = sum(p[0] for p in last) / len(last)
+                v0 = sum(p[1] for p in first) / len(first)
+                v1 = sum(p[1] for p in last) / len(last)
+                growth_bytes_day = max(0.0, (v1 - v0) * 86400 / (t1 - t0)) if t1 > t0 else 0.0
+                def eta(threshold):
+                    if used >= total * threshold:
+                        return 0
+                    if growth_bytes_day <= 0:
+                        return None
+                    return round((total * threshold - used) / growth_bytes_day, 1)
+                forecast = {
+                    "growth_gb_day": round(growth_bytes_day / 1024**3, 2),
+                    "days_to_85": eta(0.85),
+                    "days_to_95": eta(0.95),
+                    "confidence": "estimate",
+                }
+            else:
+                diagnostics["missing_trends"] += 1
+                forecast = {
+                    "growth_gb_day": None, "days_to_85": None,
+                    "days_to_95": None, "confidence": "insufficient",
+                }
+            for site in host_sites.get(int(item["hostid"]), ()):
+                items.append({
+                    "site_key": site, "hostid": str(item["hostid"]),
+                    "itemid": str(item["itemid"]),
+                    "filesystem": key[key.index("[") + 1:-6],
+                    "used_percent": round(used / total * 100, 1),
+                    "used_tb": round(used / 1024**4, 2),
+                    "total_tb": round(total / 1024**4, 2),
+                    "samples": len(first) + len(last), **forecast,
+                })
+
+        items.sort(key=lambda x: (
+            x["days_to_95"] is None,
+            x["days_to_95"] if x["days_to_95"] is not None else 999999,
+            -x["used_percent"],
+        ))
+        result = {
+            "days": days, "count": len(items), "diagnostics": diagnostics,
+            "cached": False,
+            "note": "Оценка по средним hourly trends в начале и конце периода. "
+                    "Если данных недостаточно, прогноз не рассчитывается. "
+                    "Результат кэшируется на 15 минут в памяти процесса.",
+            "items": items,
+        }
+        _CAPACITY_CACHE[days] = (time.monotonic(), result)
+        return result
