@@ -60,7 +60,9 @@ async def sync_all(db: Session) -> dict:
 
         db.execute(update(Problem).where(Problem.active.is_(True)).values(active=False, recovered_at=utcnow()))
 
-        scoring_rules = load_scoring_rules(db)\n        tag_rules = {(str(r.key).lower(), str(r.value).lower()): r.points for r in scoring_rules if r.rule_type == "tag" and r.key and r.value}\n        host_mask_rules = [r for r in scoring_rules if r.rule_type == "host_mask"]
+        scoring_rules = load_scoring_rules(db)
+        tag_rules = {(str(r.key).lower(), str(r.value).lower()): r.points for r in scoring_rules if r.rule_type == "tag" and r.key and r.value}
+        host_mask_rules = [r for r in scoring_rules if r.rule_type == "host_mask"]
         problems = await client.problems(limit=1000)
         for item in problems:
             score_input = dict(item)
