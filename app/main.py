@@ -1,4 +1,5 @@
-from pathlib import Path\nfrom fnmatch import fnmatchcase
+from pathlib import Path
+from fnmatch import fnmatchcase
 from datetime import datetime, timezone, timedelta
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
@@ -124,7 +125,8 @@ def scoring_payload(payload:dict)->dict:
     name=str(payload.get("name") or "").strip(); rule_type=str(payload.get("rule_type") or "tag").strip().lower(); key=str(payload.get("key") or "").strip() or None; value=str(payload.get("value") or "").strip() or None
     if not name: raise HTTPException(status_code=400,detail="Укажите название правила")
     if rule_type not in {"tag","host_mask","severity","duration","unacknowledged"}: raise HTTPException(status_code=400,detail="Неизвестный тип правила")
-    if rule_type=="tag" and (not key or not value): raise HTTPException(status_code=400,detail="Для tag-правила нужны key и value")\n    if rule_type=="host_mask" and not value: raise HTTPException(status_code=400,detail="Для Host mask укажите маску, например UPS-*")
+    if rule_type=="tag" and (not key or not value): raise HTTPException(status_code=400,detail="Для tag-правила нужны key и value")
+    if rule_type=="host_mask" and not value: raise HTTPException(status_code=400,detail="Для Host mask укажите маску, например UPS-*")
     return {"name":name,"rule_type":rule_type,"key":key,"value":value,"points":max(-100,min(100,int(payload.get("points",0)))),"enabled":bool(payload.get("enabled",True)),"priority":max(1,min(10000,int(payload.get("priority",100))))}
 @app.get("/api/v1/scoring/rules")
 def scoring_rules(db: Session = Depends(get_db)) -> list[dict]:
