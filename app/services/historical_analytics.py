@@ -85,7 +85,10 @@ async def capacity_report(db:Session,days:int=30)->dict:
         for item in raw:
             key=str(item.get("key_") or "")
             if not (key.startswith("vfs.fs.size[") or key.startswith("vfs.fs.dependent.size[")):continue
-            if not key.endswith(",used]"):continue
+            if not (key.startswith("vfs.fs.size[") or key.startswith("vfs.fs.dependent.size[")):
+                continue
+            if not key.endswith(",used]"):
+                continue
             diagnostics["used_items"]+=1
             try:used=float(item.get("lastvalue") or 0)
             except (ValueError,TypeError):continue
