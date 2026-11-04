@@ -99,18 +99,28 @@ async def capacity_report(db: Session, days: int = 30) -> dict:
         start = now - days * 86400
         diagnostics = {
             "hosts": len(ids), "candidate_items": 0, "used_items": 0,
+            "item_requests": 0, "item_errors": 0, "hosts_skipped": 0,
             "missing_total": 0, "empty_values": 0,
             "missing_trends": 0, "trend_requests": 0, "trend_errors": 0,
         }
         disks = []
-        # One item.get per 100 hosts. Pair used/total locally, never per disk.
-        for offset in range(0, len(ids), 100):
-            raw = await client.call("item.get", {
+        # Small host batches avoid expensive item.get queries on large Zabbix installations.
+        for offset in range(0, len(ids), 10):
+            host_batch = ids[offset:offset + 10]
+            diagnostics["item_requests"] += 1
+            try:
+                raw = await client.call("item.get", {
                 "output": ["itemid", "hostid", "name", "key_", "lastvalue", "value_type", "units"],
-                "hostids": ids[offset:offset + 100],
+                "hostids": host_batch,
                 "filter": {"status": 0},
                 "search": {"key_": "vfs.fs."},
             })
+            except Exception as exc:
+                diagnostics["item_errors"] += 1
+                diagnostics["hosts_skipped"] += len(host_batch)
+                import logging
+                logging.getLogger(__name__).warning("Capacity item.get failed for host batch: %s", exc)
+                continue
             diagnostics["candidate_items"] += len(raw)
             by_key = {(str(item["hostid"]), str(item["key_"])): item for item in raw}
             for item in raw:
