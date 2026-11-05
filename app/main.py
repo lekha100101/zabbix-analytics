@@ -18,7 +18,6 @@ from app.services.instability import instability_analytics
 from app.services.sites import site_analytics
 from app.services.sync import sync_all
 from app.services.zabbix import ZabbixClient
-from app.services.historical_analytics import reliability_report, capacity_report
 
 settings = get_settings()
 app = FastAPI(title=settings.app_name, version="0.12.0")
@@ -107,16 +106,6 @@ def internet_status(db:Session=Depends(get_db))->dict:
         if item:unavailable.append({"hostid":str(h.zabbix_hostid),"name":h.visible_name,"host":h.technical_name,**item})
     unavailable.sort(key=lambda x:(-x["score"],x["name"]))
     return {"total":len(hosts),"unavailable":len(unavailable),"available":len(hosts)-len(unavailable),"availability_percent":round((len(hosts)-len(unavailable))/len(hosts)*100,2) if hosts else 100.0,"items":unavailable}
-
-@app.get("/api/v1/analytics/reliability")
-async def analytics_reliability(days:int=Query(30,ge=7,le=90),db:Session=Depends(get_db))->dict:
-    try:return await reliability_report(db,days)
-    except Exception as exc:raise HTTPException(status_code=502,detail=str(exc)) from exc
-
-@app.get("/api/v1/analytics/capacity")
-async def analytics_capacity(days:int=Query(30,ge=7,le=90),db:Session=Depends(get_db))->dict:
-    try:return await capacity_report(db,days)
-    except Exception as exc:raise HTTPException(status_code=502,detail=str(exc)) from exc
 
 @app.post("/api/v1/scoring/recalculate")
 def recalculate(db: Session = Depends(get_db)) -> dict: return {"status":"ok","recalculated":recalculate_all(db)}
