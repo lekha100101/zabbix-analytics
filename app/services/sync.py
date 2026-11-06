@@ -66,8 +66,10 @@ async def sync_all(db: Session) -> dict:
         problems = await client.problems(limit=1000)
         for item in problems:
             score_input = dict(item)
-            score_input["host_tags"] = host_tags_for_problem(db, item.get("hosts", []))
-            impact_score, breakdown = calculate_impact(score_input, tag_rules)
+            host_tags, host_names = host_context_for_problem(db, item.get("hosts", []))
+            score_input["host_tags"] = host_tags
+            score_input["host_names"] = host_names
+            impact_score, breakdown = calculate_impact(score_input, tag_rules, host_mask_rules)
             values = {
                 "zabbix_triggerid": int(item["objectid"]) if item.get("objectid") else None,
                 "name": item["name"],
